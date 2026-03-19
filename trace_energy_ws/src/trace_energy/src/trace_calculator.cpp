@@ -1,194 +1,340 @@
+// #include "rclcpp/rclcpp.hpp"
+// #include "cv_bridge/cv_bridge.h"
+// #include "sensor_msgs/msg/image.hpp"
+// #include "opencv2/opencv.hpp"
+// #include "image_transport/image_transport.hpp"
+// #include "std_msgs/msg/header.hpp"
+// // 引入自定义舵机消息（和Python端匹配）
+// #include "servo_message/msg/servo_message.hpp"
+
+// // 类型别名简化代码
+// using ServoMsg = servo_message::msg::ServoMessage;
+// using ImageMsg = sensor_msgs::msg::Image;
+
+// class ImageProcessToServoNode : public rclcpp::Node
+// {
+// public:
+//     ImageProcessToServoNode() : Node("image_process_to_servo_node")
+//     {
+//         // ========== 1. 初始化订阅者（订阅read_image.cpp发布的图像话题） ==========
+//         image_sub_ = image_transport::create_subscription(
+//             this,
+//             "processed_image",
+//             std::bind(&ImageProcessToServoNode::image_callback, this, std::placeholders::_1),
+//             "raw",
+//             rclcpp::QoS(10).get_rmw_qos_profile()
+//         );
+
+
+
+//         // ========== 2. 初始化舵机指令发布者（给Python的servo_uart_node.py） ==========
+//         servo_pub_ = this->create_publisher<ServoMsg>("servo_control", 10);
+
+//         RCLCPP_INFO(this->get_logger(), "图像处理转舵机指令节点已启动！");
+//         RCLCPP_INFO(this->get_logger(), "正在订阅话题：processed_image");
+//     }
+
+// private:
+//     // ========== 接口1：图像处理（你自定义逻辑） ==========
+//     // 输入：订阅到的原始图像；输出：处理后的图像（供角度计算使用）
+//     cv::Mat process_image(const cv::Mat& raw_img)
+//     {
+//         // ----------------------------------------------------测试代码：显示原始图像------------------------
+        
+//         if (raw_img.empty())
+//         {
+//             RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
+//             return raw_img;
+//         }
+        
+//         // ----------------------------------------------------测试代码：显示原始图像------------------------ END
+
+
+
+
+//         // --------------------------
+//         // 此处填写你的图像处理逻辑
+//         // 示例：灰度化+边缘检测（可删除，替换为你的逻辑）
+//         // cv::cvtColor(raw_img, processed_img, cv::COLOR_BGR2GRAY);
+//         // cv::Canny(processed_img, processed_img, 50, 150);
+//         // --------------------------
+
+
+
+//         return raw_img;
+//     }
+
+//     // ========== 接口2：舵机角度计算（你自定义逻辑） ==========
+//     // 输入：处理后的图像；输出：舵机ID、目标角度（0-25/0-180范围）
+//     std::pair<int, int> calculate_servo_angle(const cv::Mat& processed_img)
+//     {
+//         int servo_id = 1;   // 默认舵机ID（1,10）
+//         int servo_angle = 45; // 默认角度（你根据计算修改）
+
+
+//         // --------------------------
+//         // 此处填写你的数学计算/角度推导逻辑
+//         // 示例：根据图像特征点计算角度（可删除，替换为你的逻辑）
+//         // int target_x = 0; // 假设你检测到的目标横坐标
+//         // servo_angle = std::min(std::max((target_x / (float)processed_img.cols) * 180, 0.0f), 180.0f);
+//         // --------------------------
+
+
+
+
+
+//         // 角度/ID范围校验（防止超出舵机量程）
+//         servo_angle = std::clamp(servo_angle, 0, 180);
+//         servo_id = std::clamp(servo_id, 0, 25);
+//         return {servo_id, servo_angle};
+//     }
+
+//     // ========== 图像话题回调（核心逻辑：接收→处理→计算→发布） ==========
+//     void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr img_msg)
+//     {
+//         cv_bridge::CvImageConstPtr cv_ptr;
+//         try
+//         {
+//             // 1. 将ROS图像消息转换为OpenCV的Mat格式
+//             cv_ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::BGR8);
+//             if (cv_ptr->image.empty())
+//             {
+//                 RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
+//                 return;
+//             }
+//             RCLCPP_INFO(this->get_logger(), "成功接收图像：尺寸%dx%d", cv_ptr->image.cols, cv_ptr->image.rows);
+
+//             cv::Mat show_img = cv_ptr->image.clone();
+//             cv::imshow("Received Image", show_img);
+//             // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
+//             char key = (char)cv::waitKey(1);
+//             if (key == 27)
+//             {
+//                 rclcpp::shutdown();
+//             }
+
+//             // 2. 执行自定义图像处理
+//             cv::Mat processed_img = process_image(cv_ptr->image.clone());
+
+//             // 3. 计算舵机目标角度
+//             auto [servo_id, servo_angle] = calculate_servo_angle(processed_img);
+
+//             // 4. 发布舵机控制指令
+//             ServoMsg servo_control_msg;
+//             servo_control_msg.servo_id = servo_id;
+//             servo_control_msg.servo_angle = servo_angle;
+//             servo_pub_->publish(servo_control_msg);
+
+//             RCLCPP_INFO(this->get_logger(), 
+//                 "发布舵机指令 → ID：%d，角度：%d",
+//                 servo_id, servo_angle);
+//         }
+//         catch (cv_bridge::Exception& e)
+//         {
+//             // 捕获图像转换异常
+//             RCLCPP_ERROR(this->get_logger(), "图像转换失败：%s", e.what());
+//         }
+//         catch (std::exception& e)
+//         {
+//             // 捕获其他异常
+//             RCLCPP_ERROR(this->get_logger(), "处理图像时出错：%s", e.what());
+//         }
+//     }
+
+//     // 成员变量
+//     image_transport::Subscriber image_sub_;          // 图像话题订阅者
+//     rclcpp::Publisher<ServoMsg>::SharedPtr servo_pub_; // 舵机指令发布者
+// };
+
+// int main(int argc, char * argv[])
+// {
+//     // ROS2初始化
+//     rclcpp::init(argc, argv);
+//     // 创建节点
+//     auto node = std::make_shared<ImageProcessToServoNode>();
+//     // 保持节点运行（阻塞，等待话题消息）
+//     rclcpp::spin(node);
+//     // 关闭ROS2
+//     rclcpp::shutdown();
+//     return 0;
+// }
+
 #include "rclcpp/rclcpp.hpp"
+#include "cv_bridge/cv_bridge.h"
+#include "sensor_msgs/msg/image.hpp"
+#include "opencv2/opencv.hpp"
+#include "image_transport/image_transport.hpp"
 #include "servo_message/msg/servo_message.hpp"
-#include <cmath>
-#include <random>
-#include <chrono>
-#include <vector>
 #include <string>
 
-// 常量定义（与Python版本对齐）
-const double WIDTH = 800.0, HEIGHT = 800.0;
-const std::pair<double, double> CENTER = {WIDTH/2, HEIGHT/2};
-const double R_PIXELS = 250.0;
-const double F_PIXELS = 1000.0;  // 虚拟焦距(像素)
-const double DEPTH_MM = 5000.0;  // 方块距离相机5000mm
-const double PREDICT_DELAY = 0.5; // 预判时间(s)
-const int YAW_SERVO_ID = 1;       // 偏航舵机编号（可根据实际修改）
-const int PITCH_SERVO_ID = 2;     // 俯仰舵机编号（可根据实际修改）
+using ServoMsg = servo_message::msg::ServoMessage;
+using ImageMsg = sensor_msgs::msg::Image;
 
-// 能量机关类（移植Python的EnergyBuff）
-class EnergyBuff {
+class ImageSubscriberNode : public rclcpp::Node
+{
 public:
-    EnergyBuff(std::string mode = "large") : mode_(mode) {
-        // 初始化随机数生成器
-        std::random_device rd;
-        gen_ = std::mt19937(rd());
-        
-        // 随机初始化运动参数
-        a_dist_ = std::uniform_real_distribution<double>(0.780, 1.045);
-        w_dist_ = std::uniform_real_distribution<double>(1.884, 2.000);
-        phi_dist_ = std::uniform_real_distribution<double>(0, 2 * M_PI);
-        
-        a_ = a_dist_(gen_);
-        w_ = w_dist_(gen_);
-        phi_ = phi_dist_(gen_);
-        b_ = 2.090 - a_;
-        
-        // 随机旋转方向（1/-1）
-        dir_dist_ = std::uniform_int_distribution<int>(0, 1);
-        direction_ = dir_dist_(gen_) == 0 ? 1 : -1;
-        
-        base_angle_ = 0.0;
-        
-        // 颜色相关（仅保留目标颜色逻辑，绘图部分移除）
-        target_color_idx_ = std::uniform_int_distribution<int>(0, 4)(gen_);
+    ImageSubscriberNode() : Node("image_subscriber_node")
+    {
+        // 1. 初始化image_transport订阅器，和发布端完全匹配
+        // 话题名 /processed_image 必须和发布节点完全一致
+        image_sub_ = image_transport::create_subscription(
+            this,
+            "processed_image",
+            std::bind(&ImageSubscriberNode::image_callback, this, std::placeholders::_1),
+            "raw",
+            rclcpp::QoS(10).get_rmw_qos_profile()
+        );
+
+        servo_pub_ = this->create_publisher<ServoMsg>("servo_control", 10);
+
+        // 初始化帧率统计变量
+        last_frame_time_ = this->get_clock()->now();
+        frame_count_ = 0;
+        current_fps_ = 0.0;
+
+        RCLCPP_INFO(this->get_logger(), "图像订阅节点启动成功，正在订阅话题：/processed_image");
+        RCLCPP_INFO(this->get_logger(), "按ESC键可关闭图像窗口，退出节点");
     }
 
-    // 切换能量机关模式（大/小）
-    void toggle_mode() {
-        mode_ = (mode_ == "large") ? "small" : "large";
-    }
-
-    // 计算角度增量（预测核心）
-    double get_delta_theta(double t, double delay) {
-        if (mode_ == "small") {
-            return (M_PI / 3.0) * delay;
-        } else {
-            // 原函数：∫(a*sin(wτ+phi) + b)dτ = -a/w * cos(wτ+phi) + b*τ
-            auto integral = [this](double tau) {
-                return (-a_ / w_) * cos(w_ * tau + phi_) + b_ * tau;
-            };
-            return integral(t + delay) - integral(t);
-        }
-    }
-
-    // 更新物理位置
-    void update(double t, double dt) {
-        double speed = 0.0;
-        if (mode_ == "small") {
-            speed = M_PI / 3.0;
-        } else {
-            speed = a_ * sin(w_ * t + phi_) + b_;
-        }
-        base_angle_ += direction_ * speed * dt;
-        // 角度归一化（避免数值过大）
-        base_angle_ = fmod(base_angle_, 2 * M_PI);
-    }
-
-    // 获取当前基础角度
-    double get_base_angle() const { return base_angle_; }
-    // 获取旋转方向
-    int get_direction() const { return direction_; }
-    // 获取模式
-    std::string get_mode() const { return mode_; }
-
-private:
-    std::string mode_;
-    double a_, w_, phi_, b_;
-    int direction_;
-    double base_angle_;
-    int target_color_idx_;  // 目标颜色索引（仅占位，无绘图逻辑）
-
-    // 随机数相关
-    std::mt19937 gen_;
-    std::uniform_real_distribution<double> a_dist_;
-    std::uniform_real_distribution<double> w_dist_;
-    std::uniform_real_distribution<double> phi_dist_;
-    std::uniform_int_distribution<int> dir_dist_;
-};
-
-// ROS2节点类
-class PredictAngleNode : public rclcpp::Node {
-public:
-    PredictAngleNode() : Node("predict_angle_node") {
-        // 创建舵机指令发布者（话题名与Python节点一致）
-        servo_pub_ = this->create_publisher<servo_message::msg::ServoMessage>(
-            "servo_control", 10);
-        
-        // 初始化能量机关
-        buff_ = std::make_unique<EnergyBuff>("large");
-        start_time_ = this->get_clock()->now();
-
-        // 10Hz定时器（与摄像头节点频率对齐）
-        timer_ = this->create_wall_timer(
-            std::chrono::milliseconds(100),
-            std::bind(&PredictAngleNode::timer_callback, this));
-
-        RCLCPP_INFO(this->get_logger(), "预测角度节点已启动！");
+    ~ImageSubscriberNode()
+    {
+        cv::destroyAllWindows();
+        RCLCPP_INFO(this->get_logger(), "图像订阅节点已关闭");
     }
 
 private:
-    void timer_callback() {
-        // 1. 计算当前时间（相对于节点启动）
-        auto now = this->get_clock()->now();
-        double current_t = (now - start_time_).seconds();
-        double dt = 0.1;  // 定时器周期100ms
+    // 核心回调函数：收到图像消息后执行
+    void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr img_msg)
+    {
+        // 1. 用cv_bridge转换ROS图像消息为OpenCV的cv::Mat
+        cv_bridge::CvImageConstPtr cv_ptr;
+        try
+        {
+            // 编码必须和发布端一致：bgr8（OpenCV默认格式）
+            cv_ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::BGR8);
+        }
+        catch (const cv_bridge::Exception& e)
+        {
+            RCLCPP_ERROR(this->get_logger(), "cv_bridge转换失败：%s", e.what());
+            return;
+        }
 
-        // 2. 更新能量机关状态
-        buff_->update(current_t, dt);
-        double delta_theta = buff_->get_delta_theta(current_t, PREDICT_DELAY);
+        // 2. 校验转换后的图像是否有效
+        if (cv_ptr->image.empty())
+        {
+            RCLCPP_WARN(this->get_logger(), "收到空图像，跳过处理");
+            return;
+        }
 
-        // 3. 计算目标扇区的预测位置
-        double target_sector_angle = buff_->get_base_angle();  // 目标扇区基础角度
-        double pred_angle = target_sector_angle + buff_->get_direction() * delta_theta;
+        // 3. 帧率统计
+        frame_count_++;
+        rclcpp::Time current_time = this->get_clock()->now();
+        double time_diff = (current_time - last_frame_time_).seconds();
+        if (time_diff >= 1.0) // 每秒更新一次FPS
+        {
+            current_fps_ = frame_count_ / time_diff;
+            frame_count_ = 0;
+            last_frame_time_ = current_time;
+            RCLCPP_INFO(this->get_logger(), "接收帧率：%.1f FPS | 图像分辨率：%dx%d", 
+                current_fps_, cv_ptr->image.cols, cv_ptr->image.rows);
+        }
 
-        // 4. 解算云台舵机角度（像素→毫米→弧度→角度）
-        double px = CENTER.first + R_PIXELS * cos(pred_angle);
-        double py = CENTER.second + R_PIXELS * sin(pred_angle);
-        double dx_pixels = px - CENTER.first;
-        double dy_pixels = py - CENTER.second;
+        // 4. 图像显示（主线程回调，安全无崩溃）
+        cv::Mat show_img = cv_ptr->image.clone();
 
-        double target_x_mm = dx_pixels * (DEPTH_MM / F_PIXELS);
-        double target_y_mm = dy_pixels * (DEPTH_MM / F_PIXELS);
-
-        // 计算yaw/pitch弧度（负号适配舵机转向）
-        double yaw_rad = -atan2(target_x_mm, DEPTH_MM);
-        double pitch_rad = -atan2(target_y_mm, DEPTH_MM);
-
-        // 转换为角度（舵机范围0-180，映射：-90~90 → 0~180）
-        double yaw_deg = rad2deg(yaw_rad) + 90.0;
-        double pitch_deg = rad2deg(pitch_rad) + 90.0;
-
-        // 5. 校验舵机角度范围（0-180）
-        yaw_deg = std::clamp(yaw_deg, 0.0, 180.0);
-        pitch_deg = std::clamp(pitch_deg, 0.0, 180.0);
-
-        // 6. 发布舵机控制指令
-        publish_servo_cmd(YAW_SERVO_ID, static_cast<int>(round(yaw_deg)));
-        publish_servo_cmd(PITCH_SERVO_ID, static_cast<int>(round(pitch_deg)));
-
-        // 打印调试信息
-        RCLCPP_INFO(this->get_logger(), 
-            "模式：%s | Yaw舵机角度：%d° | Pitch舵机角度：%d°",
-            buff_->get_mode().c_str(),
-            static_cast<int>(round(yaw_deg)),
-            static_cast<int>(round(pitch_deg)));
+        process_image(show_img);
     }
 
-    // 发布单个舵机指令
-    void publish_servo_cmd(int servo_id, int angle) {
-        auto msg = servo_message::msg::ServoMessage();
-        msg.servo_id = servo_id;
-        msg.servo_angle = angle;
-        servo_pub_->publish(msg);
+    void process_image(const cv::Mat& show_img)
+    {
+        // ----------------------------------------------------测试代码：显示原始图像------------------------
+        
+        if (show_img.empty())
+        {
+            RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
+        }
+
+        cv::putText(show_img, "FPS: " + std::to_string((int)current_fps_), 
+        cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+        cv::imshow("Received Image", show_img);
+
+        // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
+        char key = (char)cv::waitKey(1);
+        if (key == 27)
+        {
+            rclcpp::shutdown();
+        }
+
+        
+        // ----------------------------------------------------测试代码：显示原始图像------------------------ END
+
+
+
+
+        // --------------------------
+        // 此处填写你的图像处理逻辑
+        // 示例：灰度化+边缘检测（可删除，替换为你的逻辑）
+        // cv::cvtColor(raw_img, processed_img, cv::COLOR_BGR2GRAY);
+        // cv::Canny(processed_img, processed_img, 50, 150);
+        // --------------------------
+
     }
 
-    // 弧度转角度
-    double rad2deg(double rad) {
-        return rad * 180.0 / M_PI;
+
+    void calculate_servo_angle(const cv::Mat& processed_img)
+    {
+        std::vector<std::pair<int, int>> servo_controller;
+
+        int servo_id_1 = 1;   // 默认舵机ID（1,10）
+        int servo_angle_1 = 45; // 默认角度（你根据计算修改）
+
+        int servo_id_10 = 10;   // 默认舵机ID（1,10）
+        int servo_angle_10 = 145; // 默认角度（你根据计算修改）
+
+
+        // --------------------------
+        // 此处填写你的数学计算/角度推导逻辑
+        // 示例：根据图像特征点计算角度（可删除，替换为你的逻辑）
+        // int target_x = 0; // 假设你检测到的目标横坐标
+        // servo_angle = std::min(std::max((target_x / (float)processed_img.cols) * 180, 0.0f), 180.0f);
+        // --------------------------
+
+
+
+
+
+        // 角度/ID范围校验（防止超出舵机量程）
+        servo_angle_1 = std::clamp(servo_angle_1, 0, 180);
+        servo_controller.push_back({servo_id_1, servo_angle_1});
+
+        servo_angle_10 = std::clamp(servo_angle_10, 0, 180);
+        servo_controller.push_back({servo_id_10, servo_angle_10});
+
+        // 发布舵机控制消息
+        for(auto& servo : servo_controller)
+        {
+            ServoMsg msg;
+            msg.servo_id = servo.first;
+            msg.servo_angle = servo.second;
+            servo_pub_->publish(msg);
+            RCLCPP_INFO(this->get_logger(), "发布舵机指令 → ID：%d，角度：%d",servo.first, servo.second);
+        }
     }
+
 
     // 成员变量
-    rclcpp::Publisher<servo_message::msg::ServoMessage>::SharedPtr servo_pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
-    std::unique_ptr<EnergyBuff> buff_;
-    rclcpp::Time start_time_;
+    image_transport::Subscriber image_sub_;
+    rclcpp::Time last_frame_time_;
+    int frame_count_;
+    double current_fps_;
+    rclcpp::Publisher<ServoMsg>::SharedPtr servo_pub_; 
 };
 
-int main(int argc, char *argv[]) {
+int main(int argc, char * argv[])
+{
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<PredictAngleNode>();
-    rclcpp::spin(node);
+    auto node = std::make_shared<ImageSubscriberNode>();
+    rclcpp::spin(node); // 阻塞等待回调
     rclcpp::shutdown();
     return 0;
 }

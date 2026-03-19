@@ -22,8 +22,8 @@ except serial.SerialException as e:
 # 舵机控制函数（复用+增加参数校验）
 def UARTServo(servonum, angle):
     # 校验参数合理性（根据实际舵机范围调整）
-    if not (0 <= servonum <= 25):
-        print(f"无效舵机编号：{servonum}（范围0-25）")
+    if not (0 < servonum < 17):
+        print(f"无效舵机编号：{servonum}（范围1-16）")
         return
     if not (0 <= angle <= 180):
         print(f"无效舵机角度：{angle}（范围0-180）")
