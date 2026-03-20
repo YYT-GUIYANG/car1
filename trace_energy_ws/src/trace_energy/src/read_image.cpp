@@ -51,8 +51,8 @@ private:
         bool read_success = cap_.read(input_img);
 
         // ============== 关键修改3：加完整调试日志 ==============
-        RCLCPP_INFO(this->get_logger(), "read_success=%d, empty=%d, size=%dx%d", 
-            read_success, input_img.empty(), input_img.cols, input_img.rows);
+        // RCLCPP_INFO(this->get_logger(), "read_success=%d, empty=%d, size=%dx%d", 
+        //     read_success, input_img.empty(), input_img.cols, input_img.rows);
 
         if (!read_success || input_img.empty())
         {

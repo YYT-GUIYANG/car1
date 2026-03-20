@@ -60,7 +60,7 @@ class ServoUARTNode(Node):
     def cmd_callback(self, msg):
         servo_num = msg.servo_id  # 从消息中取舵机编号
         angle = msg.servo_angle   # 从消息中取角度
-        self.get_logger().info(f"收到指令：舵机{servo_num} → 角度{angle}")
+        # self.get_logger().info(f"收到指令：舵机{servo_num} → 角度{angle}")
         UARTServo(servo_num, angle)  # 执行舵机控制
 
 # 主函数

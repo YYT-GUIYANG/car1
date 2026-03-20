@@ -1,164 +1,3 @@
-// #include "rclcpp/rclcpp.hpp"
-// #include "cv_bridge/cv_bridge.h"
-// #include "sensor_msgs/msg/image.hpp"
-// #include "opencv2/opencv.hpp"
-// #include "image_transport/image_transport.hpp"
-// #include "std_msgs/msg/header.hpp"
-// // 引入自定义舵机消息（和Python端匹配）
-// #include "servo_message/msg/servo_message.hpp"
-
-// // 类型别名简化代码
-// using ServoMsg = servo_message::msg::ServoMessage;
-// using ImageMsg = sensor_msgs::msg::Image;
-
-// class ImageProcessToServoNode : public rclcpp::Node
-// {
-// public:
-//     ImageProcessToServoNode() : Node("image_process_to_servo_node")
-//     {
-//         // ========== 1. 初始化订阅者（订阅read_image.cpp发布的图像话题） ==========
-//         image_sub_ = image_transport::create_subscription(
-//             this,
-//             "processed_image",
-//             std::bind(&ImageProcessToServoNode::image_callback, this, std::placeholders::_1),
-//             "raw",
-//             rclcpp::QoS(10).get_rmw_qos_profile()
-//         );
-
-
-
-//         // ========== 2. 初始化舵机指令发布者（给Python的servo_uart_node.py） ==========
-//         servo_pub_ = this->create_publisher<ServoMsg>("servo_control", 10);
-
-//         RCLCPP_INFO(this->get_logger(), "图像处理转舵机指令节点已启动！");
-//         RCLCPP_INFO(this->get_logger(), "正在订阅话题：processed_image");
-//     }
-
-// private:
-//     // ========== 接口1：图像处理（你自定义逻辑） ==========
-//     // 输入：订阅到的原始图像；输出：处理后的图像（供角度计算使用）
-//     cv::Mat process_image(const cv::Mat& raw_img)
-//     {
-//         // ----------------------------------------------------测试代码：显示原始图像------------------------
-        
-//         if (raw_img.empty())
-//         {
-//             RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
-//             return raw_img;
-//         }
-        
-//         // ----------------------------------------------------测试代码：显示原始图像------------------------ END
-
-
-
-
-//         // --------------------------
-//         // 此处填写你的图像处理逻辑
-//         // 示例：灰度化+边缘检测（可删除，替换为你的逻辑）
-//         // cv::cvtColor(raw_img, processed_img, cv::COLOR_BGR2GRAY);
-//         // cv::Canny(processed_img, processed_img, 50, 150);
-//         // --------------------------
-
-
-
-//         return raw_img;
-//     }
-
-//     // ========== 接口2：舵机角度计算（你自定义逻辑） ==========
-//     // 输入：处理后的图像；输出：舵机ID、目标角度（0-25/0-180范围）
-//     std::pair<int, int> calculate_servo_angle(const cv::Mat& processed_img)
-//     {
-//         int servo_id = 1;   // 默认舵机ID（1,10）
-//         int servo_angle = 45; // 默认角度（你根据计算修改）
-
-
-//         // --------------------------
-//         // 此处填写你的数学计算/角度推导逻辑
-//         // 示例：根据图像特征点计算角度（可删除，替换为你的逻辑）
-//         // int target_x = 0; // 假设你检测到的目标横坐标
-//         // servo_angle = std::min(std::max((target_x / (float)processed_img.cols) * 180, 0.0f), 180.0f);
-//         // --------------------------
-
-
-
-
-
-//         // 角度/ID范围校验（防止超出舵机量程）
-//         servo_angle = std::clamp(servo_angle, 0, 180);
-//         servo_id = std::clamp(servo_id, 0, 25);
-//         return {servo_id, servo_angle};
-//     }
-
-//     // ========== 图像话题回调（核心逻辑：接收→处理→计算→发布） ==========
-//     void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr img_msg)
-//     {
-//         cv_bridge::CvImageConstPtr cv_ptr;
-//         try
-//         {
-//             // 1. 将ROS图像消息转换为OpenCV的Mat格式
-//             cv_ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::BGR8);
-//             if (cv_ptr->image.empty())
-//             {
-//                 RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
-//                 return;
-//             }
-//             RCLCPP_INFO(this->get_logger(), "成功接收图像：尺寸%dx%d", cv_ptr->image.cols, cv_ptr->image.rows);
-
-//             cv::Mat show_img = cv_ptr->image.clone();
-//             cv::imshow("Received Image", show_img);
-//             // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
-//             char key = (char)cv::waitKey(1);
-//             if (key == 27)
-//             {
-//                 rclcpp::shutdown();
-//             }
-
-//             // 2. 执行自定义图像处理
-//             cv::Mat processed_img = process_image(cv_ptr->image.clone());
-
-//             // 3. 计算舵机目标角度
-//             auto [servo_id, servo_angle] = calculate_servo_angle(processed_img);
-
-//             // 4. 发布舵机控制指令
-//             ServoMsg servo_control_msg;
-//             servo_control_msg.servo_id = servo_id;
-//             servo_control_msg.servo_angle = servo_angle;
-//             servo_pub_->publish(servo_control_msg);
-
-//             RCLCPP_INFO(this->get_logger(), 
-//                 "发布舵机指令 → ID：%d，角度：%d",
-//                 servo_id, servo_angle);
-//         }
-//         catch (cv_bridge::Exception& e)
-//         {
-//             // 捕获图像转换异常
-//             RCLCPP_ERROR(this->get_logger(), "图像转换失败：%s", e.what());
-//         }
-//         catch (std::exception& e)
-//         {
-//             // 捕获其他异常
-//             RCLCPP_ERROR(this->get_logger(), "处理图像时出错：%s", e.what());
-//         }
-//     }
-
-//     // 成员变量
-//     image_transport::Subscriber image_sub_;          // 图像话题订阅者
-//     rclcpp::Publisher<ServoMsg>::SharedPtr servo_pub_; // 舵机指令发布者
-// };
-
-// int main(int argc, char * argv[])
-// {
-//     // ROS2初始化
-//     rclcpp::init(argc, argv);
-//     // 创建节点
-//     auto node = std::make_shared<ImageProcessToServoNode>();
-//     // 保持节点运行（阻塞，等待话题消息）
-//     rclcpp::spin(node);
-//     // 关闭ROS2
-//     rclcpp::shutdown();
-//     return 0;
-// }
-
 #include "rclcpp/rclcpp.hpp"
 #include "cv_bridge/cv_bridge.h"
 #include "sensor_msgs/msg/image.hpp"
@@ -166,6 +5,8 @@
 #include "image_transport/image_transport.hpp"
 #include "servo_message/msg/servo_message.hpp"
 #include <string>
+
+const double PI = 3.14159265358979323846;
 
 using ServoMsg = servo_message::msg::ServoMessage;
 using ImageMsg = sensor_msgs::msg::Image;
@@ -175,8 +16,6 @@ class ImageSubscriberNode : public rclcpp::Node
 public:
     ImageSubscriberNode() : Node("image_subscriber_node")
     {
-        // 1. 初始化image_transport订阅器，和发布端完全匹配
-        // 话题名 /processed_image 必须和发布节点完全一致
         image_sub_ = image_transport::create_subscription(
             this,
             "processed_image",
@@ -242,21 +81,92 @@ private:
         // 4. 图像显示（主线程回调，安全无崩溃）
         cv::Mat show_img = cv_ptr->image.clone();
 
-        process_image(show_img);
+        std::vector<std::pair<int, int>> servo_controller = process_image(show_img);
+        send_servo_angle(servo_controller);
     }
 
-    void process_image(const cv::Mat& show_img)
+    std::vector<std::pair<int, int>> process_image(const cv::Mat& show_img)
     {
-        // ----------------------------------------------------测试代码：显示原始图像------------------------
+        std::vector<std::pair<int, int>> servo_controller;
+
+        int servo_id_1 = 1;   // 舵机ID1：云台上面的舵机，控制舵机俯仰
+        int servo_angle_1 = 0; // 默认角度（后续需要根据计算得出的角度修改）
+
+        int servo_id_10 = 10;   // 舵机ID10：云台下面的舵机，控制舵机偏航（水平面上旋转）
+        int servo_angle_10 = 0; // 默认角度（后续需要根据计算得出的角度修改）
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         
-        if (show_img.empty())
+        // TODO: 从这里开始就是你需要填写的代码，用于处理图像并计算舵机运动角度-------------------------------------------------------------
+
+        // 只保留摄像头中心（960*540）（400x400）区域的图像
+        cv::Mat img_crop = show_img(cv::Rect(760, 340, 400, 400));
+        // ----------------------------------------------------测试代码：显示原始图像------------------------
+        // if (show_img.empty())
+        // {
+        //     RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
+        // }
+
+        // cv::putText(show_img, "FPS: " + std::to_string((int)current_fps_), 
+        // cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+        // cv::imshow("Received Image", show_img);
+
+        // // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
+        // char key = (char)cv::waitKey(1);
+        // if (key == 27)
+        // {
+        //     rclcpp::shutdown();
+        // }
+        // ----------------------------------------------------测试代码：显示原始图像------------------------ END
+
+        cv::cvtColor(img_crop, img_crop, cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(img_crop, img_crop, cv::Size(7,7), 0);
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5,5));
+        cv::dilate(img_crop, img_crop, kernel);
+        cv::erode(img_crop, img_crop, kernel);
+        std::vector<std::vector<cv::Point>> contours;
+        std::vector<cv::Vec4i> hierarchy;
+        cv::findContours(img_crop, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        std::vector<std::vector<cv::Point>> conPoly(contours.size());   
+        std::vector<cv::Rect> rect(contours.size());
+
+        for(int i=0; i<contours.size(); i++)
         {
-            RCLCPP_WARN(this->get_logger(), "订阅到空图像，跳过本次处理");
+            double area = cv::contourArea(contours[i]);
+            if(area < 100) continue;
+            double peri = cv::arcLength(contours[i], true);
+            cv::approxPolyDP(contours[i], conPoly[i], 0.02 * peri, true);
+            rect[i] = cv::boundingRect(conPoly[i]);
+            if(fabs(pow(peri,2)/area - 4 * PI) < 10)
+            {
+                RCLCPP_INFO(this->get_logger(), "找到一个圆形轮廓，%.2f, 面积：%.2f, 周长：%.2f,圆心坐标点位置(%d,%d)", fabs(pow(peri,2)/area - 4 * PI), area, peri, rect[i].x, rect[i].y);
+
+            }
         }
 
-        cv::putText(show_img, "FPS: " + std::to_string((int)current_fps_), 
-        cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
-        cv::imshow("Received Image", show_img);
+
+
+
+        cv::imshow("Processed Image", img_crop);
 
         // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
         char key = (char)cv::waitKey(1);
@@ -265,54 +175,60 @@ private:
             rclcpp::shutdown();
         }
 
-        
-        // ----------------------------------------------------测试代码：显示原始图像------------------------ END
+
+        // 将计算得出的角度赋值给舵机角度变量
+        servo_angle_1 = 0;  // 云台上面的舵机，控制舵机俯仰角度
+        servo_angle_10 = 0; // 云台下面的舵机，控制舵机偏航（水平面上旋转）角度
+
+        // TODO: END-------------------------------------------------------------
 
 
 
 
-        // --------------------------
-        // 此处填写你的图像处理逻辑
-        // 示例：灰度化+边缘检测（可删除，替换为你的逻辑）
-        // cv::cvtColor(raw_img, processed_img, cv::COLOR_BGR2GRAY);
-        // cv::Canny(processed_img, processed_img, 50, 150);
-        // --------------------------
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        servo_controller.push_back({servo_id_1, servo_angle_1});
+        servo_controller.push_back({servo_id_10, servo_angle_10});
+
+        return servo_controller;
     }
 
 
-    void calculate_servo_angle(const cv::Mat& processed_img)
+    void send_servo_angle(std::vector<std::pair<int, int>>& servo_controller)
     {
-        std::vector<std::pair<int, int>> servo_controller;
-
-        int servo_id_1 = 1;   // 默认舵机ID（1,10）
-        int servo_angle_1 = 45; // 默认角度（你根据计算修改）
-
-        int servo_id_10 = 10;   // 默认舵机ID（1,10）
-        int servo_angle_10 = 145; // 默认角度（你根据计算修改）
-
-
-        // --------------------------
-        // 此处填写你的数学计算/角度推导逻辑
-        // 示例：根据图像特征点计算角度（可删除，替换为你的逻辑）
-        // int target_x = 0; // 假设你检测到的目标横坐标
-        // servo_angle = std::min(std::max((target_x / (float)processed_img.cols) * 180, 0.0f), 180.0f);
-        // --------------------------
-
-
-
-
-
-        // 角度/ID范围校验（防止超出舵机量程）
-        servo_angle_1 = std::clamp(servo_angle_1, 0, 180);
-        servo_controller.push_back({servo_id_1, servo_angle_1});
-
-        servo_angle_10 = std::clamp(servo_angle_10, 0, 180);
-        servo_controller.push_back({servo_id_10, servo_angle_10});
-
         // 发布舵机控制消息
         for(auto& servo : servo_controller)
         {
+            if(!(servo.first == 1 || servo.first == 10))
+            {
+                RCLCPP_ERROR(this->get_logger(), "无效的舵机ID：%d,有效ID为1和10", servo.first);
+                continue;
+            }
+
+            servo.second = std::clamp(servo.second, 0, 180);
             ServoMsg msg;
             msg.servo_id = servo.first;
             msg.servo_angle = servo.second;

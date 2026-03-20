@@ -57,6 +57,9 @@ ament_target_dependencies(
 install(TARGETS read_image image_subscriber trace_calculator
   DESTINATION lib/${PROJECT_NAME})
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
