@@ -14,7 +14,7 @@ public:
         // 话题名 /processed_image 必须和发布节点完全一致
         image_sub_ = image_transport::create_subscription(
             this,
-            "processed_image",
+            "/processed_image",
             std::bind(&ImageSubscriberNode::image_callback, this, std::placeholders::_1),
             "raw",
             rclcpp::QoS(10).get_rmw_qos_profile()
@@ -27,6 +27,13 @@ public:
 
         RCLCPP_INFO(this->get_logger(), "图像订阅节点启动成功，正在订阅话题：/processed_image");
         RCLCPP_INFO(this->get_logger(), "按ESC键可关闭图像窗口，退出节点");
+
+        // 2. 初始化image_transport发布器，和发布端完全匹配
+        image_pub_ = image_transport::create_publisher(
+            this,
+            "image_raw",
+            rclcpp::QoS(10).get_rmw_qos_profile()
+        );
     }
 
     ~ImageSubscriberNode()
@@ -74,10 +81,42 @@ private:
 
         // 4. 图像显示（主线程回调，安全无崩溃）
         cv::Mat show_img = cv_ptr->image.clone();
+
+        // int safe_padding = 50;
+        // cv::Rect roi_rect(760 + safe_padding, 340 + safe_padding, 400 - 2*safe_padding, 400 - 2*safe_padding);
+        // cv::Mat img_crop = show_img(roi_rect);
+        cv::Rect roi_rect(400, 150, 900, 930);
+        cv::Mat img_crop = show_img(roi_rect);
+
+        cv::rotate(img_crop, img_crop, cv::ROTATE_90_COUNTERCLOCKWISE);
+
+        std_msgs::msg::Header header;
+        header.stamp = this->get_clock()->now();
+        header.frame_id = "camera_link";
+        auto img_pub = cv_bridge::CvImage(header, "bgr8", img_crop).toImageMsg();
+        image_pub_.publish(img_pub);
+
+
         // 在图像上叠加FPS信息
-        cv::putText(show_img, "FPS: " + std::to_string((int)current_fps_), 
+        cv::putText(img_crop, "FPS: " + std::to_string((int)current_fps_), 
             cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
-        cv::imshow("Received Image", show_img);
+
+        // 修正：每隔10个像素点绘制一个点（用img_crop的本地坐标）
+        for (int y = 0; y < roi_rect.height; y += 10)
+        {
+            for (int x = 0; x < roi_rect.width; x += 10)
+            {
+                cv::circle(img_crop, cv::Point(x, y), 1, cv::Scalar(0, 255, 0), 1);
+            }
+        }
+
+        cv::circle(img_crop, cv::Point(roi_rect.width/2, roi_rect.height/2), 1, cv::Scalar(255, 255, 255), 1);
+
+        // 在图像上绘制中心点位置
+        cv::circle(img_crop, cv::Point(roi_rect.width/2 - 80, roi_rect.height/2 - 195), 1, cv::Scalar(255, 0, 255), 1);
+
+        
+        cv::imshow("Received Image", img_crop);
 
         // 必须加waitKey，否则窗口无法刷新；按ESC键退出节点
         char key = (char)cv::waitKey(1);
@@ -98,6 +137,8 @@ private:
     rclcpp::Time last_frame_time_;
     int frame_count_;
     double current_fps_;
+    image_transport::Publisher image_pub_;
+
 };
 
 int main(int argc, char * argv[])

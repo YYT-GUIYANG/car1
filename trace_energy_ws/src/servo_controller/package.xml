@@ -8,7 +8,8 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
-  <depend>serial</depend>
+  <!-- 运行时 import serial（PyPI: pyserial）；系统 Python 可用 apt: python3-serial；conda 须 pip install pyserial -->
+  <exec_depend>python3-serial</exec_depend>
   <depend>rosidl_default_generators</depend>
   <depend>std_msgs</depend>
 

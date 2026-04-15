@@ -1,0 +1,15 @@
+build/
+install/
+log/
+*.pyc
+__pycache__/
+*.swp
+.DS_Store
+
+# 本地运行产物
+*.zip
+*.log
+trace_energy_ws/.ros_logs/
+trace_energy_ws/.ros_smoke_logs/
+trace_energy_ws/run_test_*.txt
+trace_energy_ws/trace_run_last.log

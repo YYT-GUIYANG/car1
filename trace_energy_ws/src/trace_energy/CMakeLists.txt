@@ -15,9 +15,22 @@ find_package(image_transport REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(servo_message REQUIRED)
 
+find_package(Qt5 REQUIRED COMPONENTS Core Widgets)
+include_directories(${Qt5_INCLUDE_DIRS})
+
+# 添加moc编译支持
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
+
+
 add_executable(read_image src/read_image.cpp)
+add_executable(processed_image_preview src/processed_image_preview.cpp)
 add_executable(image_subscriber src/image_subscriber.cpp)
 add_executable(trace_calculator src/trace_calculator.cpp)
+add_executable(energy_control src/energy_control.cpp)
+add_executable(aim_control_panel src/aim_control_panel.cpp)
+
 
 target_include_directories(read_image PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -30,6 +43,14 @@ ament_target_dependencies(
   "sensor_msgs"
   "std_msgs"
   "image_transport"
+  "OpenCV"
+)
+
+ament_target_dependencies(
+  processed_image_preview
+  "rclcpp"
+  "cv_bridge"
+  "sensor_msgs"
   "OpenCV"
 )
 
@@ -54,8 +75,47 @@ ament_target_dependencies(
   "servo_message"
 )
 
-install(TARGETS read_image image_subscriber trace_calculator
+ament_target_dependencies(
+  energy_control
+  "rclcpp"
+  "cv_bridge"
+  "sensor_msgs"
+  "std_msgs"
+  "image_transport"
+  "OpenCV"
+  "servo_message"
+)
+
+ament_target_dependencies(
+  aim_control_panel
+  "rclcpp"
+  "std_msgs"
+)
+
+target_link_libraries(aim_control_panel
+  Qt5::Core
+  Qt5::Widgets
+)
+
+target_link_libraries(trace_calculator
+  ${rclcpp_LIBRARIES}
+  ${cv_bridge_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${image_transport_LIBRARIES}
+  Qt5::Core
+  Qt5::Widgets
+)
+
+install(TARGETS read_image processed_image_preview image_subscriber trace_calculator energy_control aim_control_panel
   DESTINATION lib/${PROJECT_NAME})
+
+install(PROGRAMS scripts/tracking_debug_echo.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME tracking_debug_echo)
+
+install(PROGRAMS scripts/hsv_range_tuner_gui.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME hsv_range_tuner_gui)
 
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME})

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pidtest</name>
+  <version>0.1.0</version>
+  <description>通用 12 色方块识别与云台追踪（Lab 分割 + 指定颜色 ID 四边形），无能量机关专用逻辑。</description>
+  <maintainer email="jetson@todo.todo">jetson</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>cv_bridge</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>image_transport</depend>
+  <depend>OpenCV</depend>
+  <depend>servo_message</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rqt_reconfigure</exec_depend>
+  <!-- read_image：发布 /processed_image -->
+  <exec_depend>trace_energy</exec_depend>
+  <exec_depend>servo_controller</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

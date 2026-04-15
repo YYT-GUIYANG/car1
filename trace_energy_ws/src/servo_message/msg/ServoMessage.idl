@@ -1,0 +1,19 @@
+// 使用源码 IDL 而非从 .msg 经 rosidl_adapter 生成，以避免 CMake file(STRINGS)
+// 在含中文路径（如「桌面」）下错误拆分 UTF-8，导致 servo_message 无法配置。
+// 若需从 .msg 重新生成，请在仅含 ASCII 的路径下构建一次后复制此文件，或手工同步字段。
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from servo_message/msg/ServoMessage.msg
+
+#include "builtin_interfaces/msg/Time.idl"
+
+module servo_message {
+  module msg {
+    struct ServoMessage {
+      builtin_interfaces::msg::Time timestamp;
+
+      int32 servo_id;
+
+      int32 servo_angle;
+    };
+  };
+};
