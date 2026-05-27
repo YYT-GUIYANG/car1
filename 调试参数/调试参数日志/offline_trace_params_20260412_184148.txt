@@ -1,0 +1,68 @@
+offline_trace.py 参数快照
+保存时间: 2026-04-12T18:41:48
+输入源: camera:2
+
+=== 滑条当前值（与界面一致，可直接对照变量名）===
+blur_ksize = 15
+center_circ_min = 0.74
+center_max_dist_ratio = 0.38
+center_zoom = 1
+circle_area_ratio_min = 0.8
+clahe = 0
+gamma = 0.76
+lab_thresh = 71.5
+mask_morph = 5
+min_area = 50
+rect_area_ratio_max = 0.9
+roi_frac = 0.77
+square_approx_eps = 0.024
+square_max_area_ratio = 0.52
+square_min_area = 220
+
+=== 仅命令行（无滑条）===
+bridge_mask_dilate = 2
+canny_bridge = 0
+canny_dilate = 5
+canny_t1 = 80
+canny_t2 = 160
+center_hsv_max = 5200.0
+max_center_area_frac = 0.22
+proc_width_cap = 960
+sector_hsv_max = 5200.0
+
+=== 等价启动命令（在项目「调试参数」目录执行）===
+python3 offline_trace.py --camera 2 --proc-width-cap 960 --lab-thresh 71.5 --blur 15 --mask-morph 5 --min-area 50 --center-circ-min 0.74 --circle-area-ratio-min 0.8 --rect-area-ratio-max 0.9 --center-max-dist-ratio 0.38 --square-min-area 220 --square-max-area-ratio 0.52 --square-approx-eps 0.024 --roi-frac 0.77 --center-zoom 1 --gamma 0.76 --clahe 0 --center-hsv-max 5200 --sector-hsv-max 5200 --canny-bridge 0 --canny-t1 80 --canny-t2 160 --canny-dilate 5 --bridge-mask-dilate 2
+
+=== JSON（整块可复制给脚本解析）===
+{
+  "saved_at": "2026-04-12T18:41:48",
+  "input_source": "camera:2",
+  "from_trackbars": {
+    "lab_thresh": 71.5,
+    "blur_ksize": 15,
+    "mask_morph": 5,
+    "min_area": 50.0,
+    "center_circ_min": 0.74,
+    "circle_area_ratio_min": 0.7999999999999999,
+    "rect_area_ratio_max": 0.9,
+    "center_max_dist_ratio": 0.38,
+    "square_min_area": 220.0,
+    "square_max_area_ratio": 0.52,
+    "square_approx_eps": 0.024,
+    "roi_frac": 0.77,
+    "center_zoom": 1.0,
+    "gamma": 0.76,
+    "clahe": 0.0
+  },
+  "cli_only": {
+    "proc_width_cap": 960,
+    "canny_bridge": 0,
+    "canny_t1": 80,
+    "canny_t2": 160,
+    "canny_dilate": 5,
+    "bridge_mask_dilate": 2,
+    "center_hsv_max": 5200.0,
+    "sector_hsv_max": 5200.0,
+    "max_center_area_frac": 0.22
+  }
+}

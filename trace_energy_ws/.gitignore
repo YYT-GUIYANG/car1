@@ -1,15 +1,20 @@
+# colcon 产物（可随时 colcon build 重建）
 build/
 install/
 log/
+
+# Python / 编辑器
 *.pyc
 __pycache__/
 *.swp
 .DS_Store
 
-# 本地运行产物
-*.zip
+# 本地运行日志与测试输出
 *.log
-trace_energy_ws/.ros_logs/
-trace_energy_ws/.ros_smoke_logs/
-trace_energy_ws/run_test_*.txt
-trace_energy_ws/trace_run_last.log
+run_test_*.txt
+.ros_logs/
+.ros_smoke_logs/
+.roslog/
+
+# 打包临时文件
+*.zip

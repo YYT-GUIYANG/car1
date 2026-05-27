@@ -1,3 +1,9 @@
+/**
+ * read_image.cpp — 相机采集节点
+ *
+ * 负责打开 USB 相机、做可选的 gamma/CLAHE/白平衡，然后把图发布到 /processed_image。
+ * trace_calculator 只订阅这个话题，不直接碰相机，这样调视觉和调相机可以分开跑。
+ */
 #include "rclcpp/rclcpp.hpp"
 #include "cv_bridge/cv_bridge.h"
 #include "sensor_msgs/msg/image.hpp"
@@ -7,9 +13,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -84,6 +92,60 @@ void push_unique(std::vector<std::string>* v, const std::string& p) {
     }
 }
 
+/**
+ * 仅使用 V4L2 打开摄像头。Linux 上不要用 CAP_ANY 回退，否则会走 GStreamer，
+ * 对 /dev/video* 常产生 “no source element for URI” 且无法采集。
+ * 路径失败时再尝试解析到的 /dev/videoN 的整数索引（部分机器上更稳）。
+ */
+bool open_capture_v4l_only(const std::string& device, cv::VideoCapture* cap) {
+    if (!cap) {
+        return false;
+    }
+    cap->release();
+    if (!device.empty()) {
+        *cap = cv::VideoCapture(device, cv::CAP_V4L2);
+        if (cap->isOpened()) {
+            return true;
+        }
+        cap->release();
+    }
+    namespace fs = std::filesystem;
+    if (!device.empty() && device.front() == '/') {
+        std::error_code ec;
+        const fs::path can = fs::weakly_canonical(fs::path(device), ec);
+        if (!ec) {
+            const int idx = video_index_from_dev_path(can);
+            if (idx >= 0) {
+                *cap = cv::VideoCapture(idx, cv::CAP_V4L2);
+                if (cap->isOpened()) {
+                    return true;
+                }
+                cap->release();
+            }
+        }
+    }
+    if (!device.empty()) {
+        bool all_digit = true;
+        for (unsigned char ch : device) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                all_digit = false;
+                break;
+            }
+        }
+        if (all_digit) {
+            const int idx = std::atoi(device.c_str());
+            if (idx >= 0) {
+                *cap = cv::VideoCapture(idx, cv::CAP_V4L2);
+                if (cap->isOpened()) {
+                    return true;
+                }
+                cap->release();
+            }
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 class OpenCVTestNode : public rclcpp::Node
@@ -102,6 +164,17 @@ public:
         gray_world_wb_enabled_ = this->declare_parameter<bool>("gray_world_wb_enabled", false);
         gray_world_wb_strength_ =
             std::clamp(this->declare_parameter<double>("gray_world_wb_strength", 0.72), 0.0, 1.0);
+
+        // V4L2 / UVC：默认不改，避免破坏现有行为。颜色/亮度乱跳时可试：manual 曝光 + 关 AWB。
+        // AUTO_EXPOSURE：OpenCV+V4L2 常用 1=手动曝光(MANUAL)、3=自动(AUTO)；-1=不设置。
+        camera_v4l_auto_exposure_ = static_cast<int>(this->declare_parameter<int>("camera_v4l_auto_exposure", -1));
+        camera_v4l_set_exposure_ = this->declare_parameter<bool>("camera_v4l_set_exposure", false);
+        camera_v4l_exposure_ = this->declare_parameter<double>("camera_v4l_exposure", -6.0);
+        // AUTO_WB：0=关、1=开；-1=不设置。关 AWB 后部分相机可再设 WB_TEMPERATURE。
+        camera_v4l_auto_wb_ = static_cast<int>(this->declare_parameter<int>("camera_v4l_auto_wb", -1));
+        camera_v4l_wb_temperature_ = static_cast<int>(this->declare_parameter<int>("camera_v4l_wb_temperature", -1));
+        camera_v4l_gain_ = this->declare_parameter<double>("camera_v4l_gain", -1.0);
+
         const std::string camera_device = this->declare_parameter<std::string>("camera_device", "");
         const std::string skip_v4l_video_indices_str =
             this->declare_parameter<std::string>("skip_v4l_video_indices", "0,1");
@@ -143,13 +216,7 @@ public:
         std::string selected_device;
         for (const auto &device : camera_candidates)
         {
-            // 优先 V4L2，避免 Linux 上 CAP_ANY 走 GStreamer 报一长串 warning 且偶发空帧
-            cap_ = cv::VideoCapture(device, cv::CAP_V4L2);
-            if (!cap_.isOpened()) {
-                cap_ = cv::VideoCapture(device, cv::CAP_ANY);
-            }
-            if (cap_.isOpened())
-            {
+            if (open_capture_v4l_only(device, &cap_)) {
                 selected_device = device;
                 break;
             }
@@ -172,15 +239,17 @@ public:
             } else {
                 RCLCPP_ERROR(
                     this->get_logger(),
-                    "摄像头打开失败！请检查外接USB摄像头连接和设备占用情况（可指定 camera_device 参数强制锁定设备）"
+                    "摄像头打开失败！请检查：设备是否插入、是否被占用、当前用户是否在 video 组；"
+                    "可执行 v4l2-ctl --list-devices 确认采集节点；启动时可用 camera_device:=/dev/videoN 强制指定。"
                 );
             }
-            rclcpp::shutdown();
-            return;
+            throw std::runtime_error("read_image: camera open failed (see log above)");
         }
         // 预读3帧丢弃（解决摄像头预热无效帧）
         cv::Mat dummy;
         for(int i=0; i<3; i++) cap_.read(dummy);
+
+        apply_v4l_user_controls_();
 
         const int cap_w = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
         const int cap_h = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
@@ -211,6 +280,18 @@ public:
             gray_world_wb_enabled_ ? "on" : "off",
             gray_world_wb_strength_,
             publish_period_ms_);
+        if (camera_v4l_auto_exposure_ >= 0 || camera_v4l_set_exposure_ || camera_v4l_auto_wb_ >= 0 ||
+            camera_v4l_wb_temperature_ >= 0 || camera_v4l_gain_ >= 0.0) {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "V4L 用户控制 camera_v4l_auto_exposure=%d set_exposure=%s exposure=%.4f auto_wb=%d wb_temp=%d gain=%.4f",
+                camera_v4l_auto_exposure_,
+                camera_v4l_set_exposure_ ? "true" : "false",
+                camera_v4l_exposure_,
+                camera_v4l_auto_wb_,
+                camera_v4l_wb_temperature_,
+                camera_v4l_gain_);
+        }
 
         // 必须用绝对话题名，否则与 trace_calculator 各带节点前缀，二者永远对不上
         image_pub_ = image_transport::create_publisher(this, "/processed_image", rclcpp::QoS(10).get_rmw_qos_profile());
@@ -231,6 +312,65 @@ public:
     }
 
 private:
+    void apply_v4l_user_controls_()
+    {
+        if (!cap_.isOpened()) {
+            return;
+        }
+        if (camera_v4l_auto_exposure_ >= 0) {
+            const bool ok =
+                cap_.set(cv::CAP_PROP_AUTO_EXPOSURE, static_cast<double>(camera_v4l_auto_exposure_));
+            const double rb = cap_.get(cv::CAP_PROP_AUTO_EXPOSURE);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[CAMERA] V4L AUTO_EXPOSURE 请求=%d %s 读回=%.6f（1 常为手动、3 常为自动；以驱动为准）",
+                camera_v4l_auto_exposure_,
+                ok ? "set_ok" : "set_fail",
+                rb);
+        }
+        if (camera_v4l_set_exposure_) {
+            const bool ok = cap_.set(cv::CAP_PROP_EXPOSURE, camera_v4l_exposure_);
+            const double rb = cap_.get(cv::CAP_PROP_EXPOSURE);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[CAMERA] V4L EXPOSURE 请求=%.6f %s 读回=%.6f（UVC 常为负值档位，需实测）",
+                camera_v4l_exposure_,
+                ok ? "set_ok" : "set_fail",
+                rb);
+        }
+        if (camera_v4l_auto_wb_ >= 0) {
+            const bool ok = cap_.set(cv::CAP_PROP_AUTO_WB, static_cast<double>(camera_v4l_auto_wb_));
+            const double rb = cap_.get(cv::CAP_PROP_AUTO_WB);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[CAMERA] V4L AUTO_WB 请求=%d %s 读回=%.6f（0 关 / 1 开）",
+                camera_v4l_auto_wb_,
+                ok ? "set_ok" : "set_fail",
+                rb);
+        }
+        if (camera_v4l_wb_temperature_ >= 0) {
+            const bool ok =
+                cap_.set(cv::CAP_PROP_WB_TEMPERATURE, static_cast<double>(camera_v4l_wb_temperature_));
+            const double rb = cap_.get(cv::CAP_PROP_WB_TEMPERATURE);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[CAMERA] V4L WB_TEMPERATURE 请求=%d %s 读回=%.6f",
+                camera_v4l_wb_temperature_,
+                ok ? "set_ok" : "set_fail",
+                rb);
+        }
+        if (camera_v4l_gain_ >= 0.0) {
+            const bool ok = cap_.set(cv::CAP_PROP_GAIN, camera_v4l_gain_);
+            const double rb = cap_.get(cv::CAP_PROP_GAIN);
+            RCLCPP_INFO(
+                this->get_logger(),
+                "[CAMERA] V4L GAIN 请求=%.4f %s 读回=%.6f",
+                camera_v4l_gain_,
+                ok ? "set_ok" : "set_fail",
+                rb);
+        }
+    }
+
     static void apply_gamma_bgr_inplace(cv::Mat& bgr, double gamma)
     {
         if (bgr.empty() || bgr.type() != CV_8UC3) {
@@ -368,13 +508,26 @@ private:
     double clahe_l_clip_limit_{0.0};
     bool gray_world_wb_enabled_{false};
     double gray_world_wb_strength_{0.72};
+
+    int camera_v4l_auto_exposure_{-1};
+    bool camera_v4l_set_exposure_{false};
+    double camera_v4l_exposure_{-6.0};
+    int camera_v4l_auto_wb_{-1};
+    int camera_v4l_wb_temperature_{-1};
+    double camera_v4l_gain_{-1.0};
 };
 
 int main(int argc, char * argv[])
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<OpenCVTestNode>();
-    rclcpp::spin(node);
+    try {
+        auto node = std::make_shared<OpenCVTestNode>();
+        rclcpp::spin(node);
+    } catch (const std::exception& e) {
+        RCLCPP_FATAL(rclcpp::get_logger("read_image"), "%s", e.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 }

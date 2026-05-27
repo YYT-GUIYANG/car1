@@ -1,4 +1,15 @@
-// trace_calculator — 通用 12 色 Lab 追踪：中心圆几何 + HSV 读色 + 同色四边形扇区 + PD+I + 像素速度外推/丢失续航 + 正弦搜索
+/**
+ * trace_calculator.cpp — 能量机关视觉跟踪主节点（可执行名 trace_calculator，类名 ImageSubscriberNode）
+ *
+ * 我们这套的思路可以概括成四步：
+ *   1. 订阅 /processed_image，在画面中心 ROI 里做 Lab 分色 + 轮廓分析；
+ *   2. 先找「中心圆盘」，再用 HSV 把颜色 id 读准，然后在扇区里找同色方块；
+ *   3. 算目标中心与激光准星之间的像素误差 x_error / y_error；
+ *   4. PD（可选 I）算出俯仰/偏航舵机角，发布到 /servo_control。
+ *
+ * 调参建议：先在 调试参数/offline_trace.py 里用滑条把识别调稳，再把数值写到 launch 或本节点参数里。
+ * 参数含义与「调大/调小会怎样」见仓库根目录 README.md 的「调试参数说明」一节。
+ */
 #include "rclcpp/rclcpp.hpp"
 #include "cv_bridge/cv_bridge.h"
 #include "sensor_msgs/msg/image.hpp"
@@ -20,6 +31,7 @@ using ServoMsg = servo_message::msg::ServoMessage;
 
 namespace {
 
+// 现场 12 种能量块颜色的 BGR 参考表（id 与赛场色块编号对应，Lab 分色就是跟这张表比距离）
 const std::vector<std::pair<int, cv::Vec3b>> kReferenceBgr = {
     {0, cv::Vec3b(116, 5, 202)},   {3, cv::Vec3b(167, 1, 98)},   {4, cv::Vec3b(7, 237, 19)},
     {5, cv::Vec3b(23, 51, 215)},   {6, cv::Vec3b(241, 132, 251)}, {7, cv::Vec3b(17, 168, 214)},
@@ -27,6 +39,7 @@ const std::vector<std::pair<int, cv::Vec3b>> kReferenceBgr = {
     {11, cv::Vec3b(85, 152, 55)},  {12, cv::Vec3b(57, 244, 231)}, {16, cv::Vec3b(23, 3, 23)},
 };
 
+// 连通域打包：后面选中心圆、选扇区方块都靠这些字段打分
 struct Blob {
     int cid = -1;
     double area = 0.0;
@@ -38,6 +51,7 @@ struct Blob {
     std::vector<cv::Point> contour;
 };
 
+// 跨帧记忆：平滑目标点、速度 EMA、丢检计数，避免一帧没认出就云台乱甩
 struct TrackState {
     bool has_smooth_target = false;
     cv::Point2f smooth_target{0.f, 0.f};
@@ -89,6 +103,7 @@ struct CenterDiskGeomParams {
     double min_center_area = 25.0;
 };
 
+// 根据圆度 + 长宽比粗分：circle / square / other（中心圆和扇区方块筛选会用到）
 std::string classify_shape(double circ, const std::vector<cv::Point>& c) {
     constexpr double kCircleMin = 0.78;
     constexpr double kSquareLo = 0.68;
@@ -154,7 +169,9 @@ static int classify_blob_mean_bgr_hsv_nearest(const cv::Mat& work_bgr, const Blo
             best_id = kv.first;
         }
     }
-    if (best_id < 0 || best_d > max_dist_sq) return -1;
+    // id=10 在现场光照下波动较大，给一点轻微容差，减少漏检。
+    const double accept_th = (best_id == 10) ? (max_dist_sq * 1.18) : max_dist_sq;
+    if (best_id < 0 || best_d > accept_th) return -1;
     return best_id;
 }
 
@@ -322,13 +339,70 @@ static Blob* pick_sector_quad_same_hsv(
     double sector_min_area,
     double sector_max_area_ratio,
     double frame_area,
-    double approx_eps) {
+    double approx_eps,
+    double area_rel_tol,
+    double diam_side_rel_tol,
+    double max_dist_center_radius,
+    bool has_prefer_pt,
+    const cv::Point2f& prefer_pt,
+    double prefer_radius_px,
+    double prefer_bonus) {
     if (!center_blk || ref_id < 0) return nullptr;
     Blob* best = nullptr;
-    double best_area = -1.0;
+    double best_score = -1e18;
+    const double center_area = std::max(1.0, center_blk->area);
+    const double center_diam = 2.0 * std::sqrt(center_area / CV_PI);
+    const double center_radius = std::max(1.0, center_diam * 0.5);
+    const cv::Point2f cpt(static_cast<float>(center_blk->cx), static_cast<float>(center_blk->cy));
     for (auto& b : blobs) {
         if (&b == center_blk) continue;
         if (b.area < sector_min_area || b.area > sector_max_area_ratio * frame_area) continue;
+        const int nv = contour_approx_vertex_count(b.contour, approx_eps);
+        if (nv != 4 && nv != 5) continue;
+        const int hid = classify_blob_mean_bgr_hsv_nearest(work_bgr, b, sector_hsv_max_dist_sq);
+        if (hid != ref_id) continue;
+        const double area_rel = std::abs(b.area - center_area) / center_area;
+        if (area_rel > area_rel_tol) continue;
+        const double side = std::sqrt(std::max(1.0, b.area));
+        const double ds_rel = std::abs(center_diam - side) / std::max(1.0, side);
+        if (ds_rel > diam_side_rel_tol) continue;
+        const double dist = std::hypot(static_cast<double>(b.cx) - cpt.x, static_cast<double>(b.cy) - cpt.y);
+                                                                                                // 距离门限做自适应下限：除了中心圆半径倍数，还要允许至少与候选方块边长同量级的距离
+        const double dist_cap = std::max(std::max(0.8, max_dist_center_radius) * center_radius, 2.2 * side);
+        if (dist > dist_cap) continue;
+        // 单评分：优先几何一致(面积/边长)，其次距离中心圆适中，避免只按面积选到错误大块
+        double score = -3.0 * area_rel - 2.0 * ds_rel - 0.0025 * dist + 0.0006 * b.area;
+        if (has_prefer_pt && prefer_radius_px > 1.0) {
+            const double dp =
+                std::hypot(static_cast<double>(b.cx) - prefer_pt.x, static_cast<double>(b.cy) - prefer_pt.y);
+            if (dp < prefer_radius_px) {
+                const double k = 1.0 - dp / prefer_radius_px;
+                score += std::max(0.0, prefer_bonus) * k;
+            }
+        }
+        if (score > best_score) {
+            best_score = score;
+            best = &b;
+        }
+    }
+    return best;
+}
+
+static Blob* pick_largest_quad_for_color_hsv(
+    std::vector<Blob>& blobs,
+    int ref_id,
+    const cv::Mat& work_bgr,
+    double sector_hsv_max_dist_sq,
+    double sector_min_area,
+    double sector_max_area_ratio,
+    double frame_area,
+    double approx_eps) {
+    if (ref_id < 0) return nullptr;
+    Blob* best = nullptr;
+    double best_area = -1.0;
+    const double a_cap = sector_max_area_ratio * frame_area;
+    for (auto& b : blobs) {
+        if (b.area < sector_min_area || b.area > a_cap) continue;
         const int nv = contour_approx_vertex_count(b.contour, approx_eps);
         if (nv != 4 && nv != 5) continue;
         const int hid = classify_blob_mean_bgr_hsv_nearest(work_bgr, b, sector_hsv_max_dist_sq);
@@ -341,11 +415,50 @@ static Blob* pick_sector_quad_same_hsv(
     return best;
 }
 
+static Blob* pick_largest_blob_for_color_hsv(
+    std::vector<Blob>& blobs,
+    int ref_id,
+    const cv::Mat& work_bgr,
+    double hsv_max_dist_sq,
+    double min_area,
+    double max_area_ratio,
+    double frame_area,
+    bool has_center_anchor,
+    const cv::Point2f& center_anchor,
+    double center_anchor_radius,
+    double min_dist_center_radius,
+    double max_dist_center_radius) {
+    if (ref_id < 0) return nullptr;
+    Blob* best = nullptr;
+    double best_area = -1.0;
+    const double area_cap = std::max(min_area, max_area_ratio * frame_area);
+    const double c_rad = std::max(1.0, center_anchor_radius);
+    for (auto& b : blobs) {
+        if (b.area < min_area || b.area > area_cap) continue;
+        const int hid = classify_blob_mean_bgr_hsv_nearest(work_bgr, b, hsv_max_dist_sq);
+        if (hid != ref_id) continue;
+        if (has_center_anchor) {
+            const double d = std::hypot(static_cast<double>(b.cx) - center_anchor.x, static_cast<double>(b.cy) - center_anchor.y);
+            const double d_min = std::max(0.0, min_dist_center_radius) * c_rad;
+            const double d_max = std::max(d_min + 1.0, std::max(0.0, max_dist_center_radius) * c_rad);
+            if (d < d_min || d > d_max) continue;
+        }
+        if (b.area > best_area) {
+            best_area = b.area;
+            best = &b;
+        }
+    }
+    return best;
+}
+
 }  // namespace
 
+// ROS2 节点本体：下面构造函数里 declare_parameter 的每一项，都能在 launch 里改
 class ImageSubscriberNode : public rclcpp::Node {
 public:
     ImageSubscriberNode() : Node("image_subscriber_node") {
+        // ---------- 模式与瞄准基准 ----------
+        energy_mode_ = this->declare_parameter<std::string>("energy_mode", "large");
         control_enabled_ = this->declare_parameter<bool>("control_enabled", true);
         laser_center_ratio_x_ = this->declare_parameter<double>("laser_center_ratio_x", 0.5);
         laser_center_ratio_y_ = this->declare_parameter<double>("laser_center_ratio_y", 0.5);
@@ -354,8 +467,9 @@ public:
         init_pitch_deg_ = this->declare_parameter<double>("init_pitch_deg", 340.0);
         init_yaw_deg_ = this->declare_parameter<double>("init_yaw_deg", 170.0);
         startup_hold_frames_ = this->declare_parameter<int>("startup_hold_frames", 60);
-        servo_id_pitch_ = this->declare_parameter<int>("servo_id_pitch", 8);
-        servo_id_yaw_ = this->declare_parameter<int>("servo_id_yaw", 11);
+        // ---------- 舵机 ID 与角度限位（要和实际控制板、串口节点一致）----------
+        servo_id_pitch_ = this->declare_parameter<int>("servo_id_pitch", 11);
+        servo_id_yaw_ = this->declare_parameter<int>("servo_id_yaw", 8);
         servo_pitch_min_deg_ = this->declare_parameter<double>("servo_pitch_min_deg", 0.0);
         servo_pitch_max_deg_ = this->declare_parameter<double>("servo_pitch_max_deg", 360.0);
         servo_yaw_min_deg_ = this->declare_parameter<double>("servo_yaw_min_deg", 0.0);
@@ -364,9 +478,17 @@ public:
             this->declare_parameter<double>("servo_pitch_travel_half_span_deg", 40.0);
         servo_yaw_travel_half_span_deg_ =
             this->declare_parameter<double>("servo_yaw_travel_half_span_deg", 40.0);
+        servo_pitch_travel_pos_deg_ = this->declare_parameter<double>("servo_pitch_travel_pos_deg", 30.0);
+        servo_pitch_travel_neg_deg_ = this->declare_parameter<double>("servo_pitch_travel_neg_deg", 10.0);
+        servo_yaw_travel_pos_deg_ = this->declare_parameter<double>("servo_yaw_travel_pos_deg", 20.0);
+        servo_yaw_travel_neg_deg_ = this->declare_parameter<double>("servo_yaw_travel_neg_deg", 20.0);
+        // ---------- 图像识别：Lab 阈值、模糊、形态学、处理宽度上限 ----------
         trace_proc_width_cap_ = static_cast<int>(std::clamp(
             this->declare_parameter<int>("trace_proc_width_cap_large", 960), int64_t{320}, int64_t{1920}));
         lab_thresh_ = this->declare_parameter<double>("large_lab_thresh", 71.5);
+        trace_proc_width_cap_small_ = static_cast<int>(std::clamp(
+            this->declare_parameter<int>("trace_proc_width_cap_small", 880), int64_t{320}, int64_t{1920}));
+        small_lab_thresh_ = this->declare_parameter<double>("small_lab_thresh", 58.0);
         lab_preprocess_blur_ksize_ = this->declare_parameter<int>("lab_preprocess_blur_ksize", 15);
         lab_mask_morph_ksize_ = this->declare_parameter<int>("lab_mask_morph_ksize", 5);
         vis_input_gamma_ = std::clamp(this->declare_parameter<double>("vis_input_gamma", 0.76), 0.35, 3.5);
@@ -381,33 +503,49 @@ public:
             std::clamp(this->declare_parameter<int>("lab_canny_dilate_px", 5), int64_t{1}, int64_t{15}));
         lab_canny_bridge_mask_dilate_ = static_cast<int>(
             std::clamp(this->declare_parameter<int>("lab_canny_bridge_mask_dilate", 2), int64_t{1}, int64_t{5}));
+        // ---------- 控制环：大/小能量各自的 Kp Kd Ki、死区、低通、搜索摆幅 ----------
         ctrl_integ_max_px_s_ =
             std::clamp(this->declare_parameter<double>("ctrl_integ_max_px_s", 120.0), 10.0, 800.0);
         kp_ = this->declare_parameter<double>("large_kp", 0.026);
         kd_ = this->declare_parameter<double>("large_kd", 0.022);
         ki_yaw_ = this->declare_parameter<double>("large_ki_yaw", 0.0);
         ki_pitch_ = this->declare_parameter<double>("large_ki_pitch", 0.0);
+        small_kp_ = this->declare_parameter<double>("small_kp", 0.013);
+        small_kd_ = this->declare_parameter<double>("small_kd", 0.012);
+        small_ki_yaw_ = this->declare_parameter<double>("small_ki_yaw", 0.0);
+        small_ki_pitch_ = this->declare_parameter<double>("small_ki_pitch", 0.0);
         err_lp_beta_yaw_ = this->declare_parameter<double>("large_err_lp_beta_yaw", 0.52);
         err_lp_beta_pitch_ = this->declare_parameter<double>("large_err_lp_beta_pitch", 0.30);
+        small_err_lp_beta_yaw_ = this->declare_parameter<double>("small_err_lp_beta_yaw", 0.46);
+        small_err_lp_beta_pitch_ = this->declare_parameter<double>("small_err_lp_beta_pitch", 0.42);
         deadband_px_ = this->declare_parameter<int>("large_deadband_px", 2);
         deadband_yaw_px_ = this->declare_parameter<int>("large_deadband_yaw_px", 1);
         max_delta_deg_ = this->declare_parameter<double>("large_max_delta_deg", 1.05);
+        small_deadband_ = this->declare_parameter<int>("small_deadband", 12);
+        small_max_delta_deg_ = this->declare_parameter<double>("small_max_delta_deg", 0.50);
         yaw_gain_ = this->declare_parameter<double>("large_yaw_gain", 1.58);
         yaw_kp_mult_ = this->declare_parameter<double>("large_yaw_kp_mult", 1.75);
         yaw_min_step_deg_ = this->declare_parameter<double>("large_yaw_min_step_deg", 0.52);
+        small_min_step_deg_ = this->declare_parameter<double>("small_min_step_deg", 0.18);
+        small_lead_ms_ = this->declare_parameter<double>("small_lead_ms", 28.0);
+        small_settle_px_ = this->declare_parameter<double>("small_settle_px", 14.0);
+        small_settle_frames_ = this->declare_parameter<int>("small_settle_frames", 5);
         near_tgt_yaw_kp_scale_ = this->declare_parameter<double>("large_near_tgt_yaw_kp_scale", 0.92);
         search_yaw_amp_deg_ = this->declare_parameter<double>("large_square_search_yaw_amp_deg", 32.0);
         search_pitch_amp_deg_ = this->declare_parameter<double>("small_search_pitch_amp_deg", 12.0);
         search_phase_step_ = this->declare_parameter<double>("small_search_phase_step", 0.10);
         search_pitch_phase_step_ = this->declare_parameter<double>("small_search_pitch_phase_step", 0.035);
-        search_enter_frames_ = this->declare_parameter<int>("square_search_enter_frames", 2);
+        search_enter_frames_ = this->declare_parameter<int>("small_search_enter_frames", 3);
+        small_center_hub_dist_frac_ = this->declare_parameter<double>("small_center_hub_dist_frac", 0.32);
         settle_px_ = this->declare_parameter<double>("large_settle_px", 8.0);
         settle_frames_ = this->declare_parameter<int>("large_settle_frames", 4);
         servo_angle_smooth_beta_ = this->declare_parameter<double>("servo_angle_smooth_beta", 0.32);
         publish_tracking_debug_ = this->declare_parameter<bool>("publish_tracking_debug", true);
         show_vis_window_ = this->declare_parameter<bool>("show_vis_window", true);
+        runtime_tuning_enable_ = this->declare_parameter<bool>("runtime_tuning_enable", true);
         publish_trace_debug_image_ = this->declare_parameter<bool>("publish_trace_debug_image", true);
         trace_debug_image_topic_ = this->declare_parameter<std::string>("trace_debug_image_topic", "/trace_debug_image");
+        // ---------- ROI、强光抑制、目标平滑与丢检预测 ----------
         roi_frac_ = this->declare_parameter<double>("large_square_roi_frac", 0.77);
         center_roi_zoom_ = this->declare_parameter<double>("center_roi_zoom", 1.0);
         suppress_bright_lights_ = this->declare_parameter<bool>("suppress_bright_lights", false);
@@ -424,6 +562,54 @@ public:
         predict_lead_ms_ = this->declare_parameter<double>("large_square_predict_lead_ms", 62.0);
         predict_arm_frames_ = this->declare_parameter<int>("large_square_predict_arm_frames", 8);
         predict_vel_beta_ = this->declare_parameter<double>("large_square_predict_vel_beta", 0.28);
+        // ---------- 小能量：锁中心色、仅追同色块、已知转速预测 ----------
+        small_known_speed_predict_enable_ = this->declare_parameter<bool>("small_known_speed_predict_enable", true);
+        small_known_speed_deg_s_ = this->declare_parameter<double>("small_known_speed_deg_s", 60.0);
+        small_known_speed_dir_sign_ = this->declare_parameter<int>("small_known_speed_dir_sign", 1);
+        small_known_speed_blend_ = this->declare_parameter<double>("small_known_speed_blend", 0.68);
+        color_lock_enable_ = this->declare_parameter<bool>("small_center_color_lock_enable", true);
+        color_lock_stable_frames_ = this->declare_parameter<int>("small_center_color_lock_stable_frames", 4);
+        color_lock_timeout_frames_ = this->declare_parameter<int>("small_center_color_lock_timeout_frames", 36);
+        center_color_relock_after_miss_frames_ =
+            this->declare_parameter<int>("center_color_relock_after_miss_frames", 10);
+        color_only_after_lock_enable_ = this->declare_parameter<bool>("small_color_only_after_lock_enable", true);
+        color_only_arm_frames_ = this->declare_parameter<int>("small_color_only_arm_frames", 6);
+        disable_blob_fallback_ = this->declare_parameter<bool>("disable_blob_fallback", true);
+        aim_workflow_enabled_ = this->declare_parameter<bool>("aim_workflow_enabled", false);
+        stable_online_mode_ = this->declare_parameter<bool>("stable_online_mode", true);
+        stable_target_hold_frames_ = this->declare_parameter<int>("stable_target_hold_frames", 3);
+        stable_transition_blend_frames_ = this->declare_parameter<int>("stable_transition_blend_frames", 5);
+        stable_disable_predict_ = this->declare_parameter<bool>("stable_disable_predict", true);
+        stable_disable_search_ = this->declare_parameter<bool>("stable_disable_search", true);
+        stable_fixed_dt_s_ = std::clamp(this->declare_parameter<double>("stable_fixed_dt_s", 0.04), 0.01, 0.1);
+        // ---------- 几何选靶：中心圆、扇区方块、HSV 重标、回退 blob ----------
+        rt_kp_ = small_kp_;
+        rt_kd_ = small_kd_;
+        rt_max_delta_deg_ = small_max_delta_deg_;
+        rt_min_step_deg_ = small_min_step_deg_;
+        rt_deadband_px_ = static_cast<double>(small_deadband_);
+        rt_err_lp_beta_ = small_err_lp_beta_pitch_;
+        rt_servo_smooth_beta_ = servo_angle_smooth_beta_;
+        rt_hold_frames_ = stable_target_hold_frames_;
+        rt_transition_frames_ = stable_transition_blend_frames_;
+        center_square_area_rel_tol_ =
+            std::clamp(this->declare_parameter<double>("center_square_area_rel_tol", 0.45), 0.05, 1.5);
+        center_square_diam_side_rel_tol_ =
+            std::clamp(this->declare_parameter<double>("center_square_diam_side_rel_tol", 0.35), 0.05, 1.5);
+        square_max_dist_center_radius_ =
+            std::clamp(this->declare_parameter<double>("square_max_dist_center_radius", 2.8), 0.5, 8.0);
+        sector_prefer_last_enable_ = this->declare_parameter<bool>("sector_prefer_last_enable", true);
+        sector_prefer_radius_px_ =
+            std::clamp(this->declare_parameter<double>("sector_prefer_radius_px", 85.0), 10.0, 400.0);
+        sector_prefer_bonus_ =
+            std::clamp(this->declare_parameter<double>("sector_prefer_bonus", 0.35), 0.0, 2.0);
+        fallback_blob_max_area_ratio_ =
+            std::clamp(this->declare_parameter<double>("fallback_blob_max_area_ratio", 0.10), 0.01, 0.95);
+        fallback_blob_min_dist_center_radius_ =
+            std::clamp(this->declare_parameter<double>("fallback_blob_min_dist_center_radius", 0.35), 0.0, 8.0);
+        fallback_blob_max_dist_center_radius_ =
+            std::clamp(this->declare_parameter<double>("fallback_blob_max_dist_center_radius", 3.0), 0.2, 12.0);
+        reacquire_blend_frames_ = this->declare_parameter<int>("small_reacquire_blend_frames", 2);
         lab_min_area_seg_ = this->declare_parameter<double>("large_lab_min_area_seg", 50.0);
         center_circle_area_ratio_min_ =
             std::clamp(this->declare_parameter<double>("center_circle_area_ratio_min", 0.8), 0.05, 0.999);
@@ -440,6 +626,8 @@ public:
         center_hsv_max_dist_sq_ = this->declare_parameter<double>("large_center_hsv_max_dist_sq", 6200.0);
         sector_hsv_max_dist_sq_ = this->declare_parameter<double>("large_blob_hsv_max_dist_sq", 5200.0);
         publish_center_color_id_ = this->declare_parameter<bool>("publish_center_color_id", true);
+        if (energy_mode_ != "small" && energy_mode_ != "large") energy_mode_ = "large";
+        is_small_mode_ = (energy_mode_ == "small");
 
         image_sub_ = image_transport::create_subscription(
             this,
@@ -450,6 +638,24 @@ public:
         servo_pub_ = this->create_publisher<ServoMsg>("servo_control", 10);
         tracking_debug_pub_ = this->create_publisher<std_msgs::msg::Float64MultiArray>("/tracking_debug", 10);
         center_color_pub_ = this->create_publisher<std_msgs::msg::Int32>("/center_color_id", 10);
+        aim_command_sub_ = this->create_subscription<std_msgs::msg::Int32>(
+            "/aim_command", rclcpp::QoS(10),
+            [this](const std_msgs::msg::Int32::SharedPtr msg) {
+                if (!msg) return;
+                if (msg->data == 0) {
+                    aim_started_ = false;
+                } else if (msg->data == 1) {
+                    aim_started_ = true;
+                    aim_relock_requested_ = false;
+                } else if (msg->data == 2) {
+                    aim_started_ = false;
+                    aim_relock_requested_ = true;
+                    locked_center_color_id_ = -1;
+                    center_color_candidate_ = -1;
+                    center_color_stable_count_ = 0;
+                    color_only_active_ = false;
+                }
+            });
         trace_debug_pub_ = image_transport::create_publisher(this, trace_debug_image_topic_, rclcpp::QoS(1).get_rmw_qos_profile());
 
         last_frame_time_ = this->get_clock()->now();
@@ -467,6 +673,7 @@ private:
         RCLCPP_WARN(this->get_logger(), "[TRACE] 无有效相机帧");
     }
 
+    // 每来一帧相机图就进 process_image；这里只负责格式转换和 FPS 统计
     void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr img_msg) {
         cv_bridge::CvImageConstPtr cv_ptr;
         try {
@@ -492,6 +699,7 @@ private:
         process_image(cv_ptr->image);
     }
 
+    // 单帧主流程：裁剪 ROI → 分色找 blob → 选中心圆和扇区目标 → 算误差 → PD 输出舵机角
     std::vector<std::pair<int, int>> process_image(const cv::Mat& src) {
         std::vector<std::pair<int, int>> out;
         frame_center_lab_cid_ = -1;
@@ -506,6 +714,7 @@ private:
             servo_init_once = true;
         }
 
+        // 【1】裁中心 ROI，减少边缘干扰；ROI 太小会把旋转扇区裁掉
         const float roi_f = static_cast<float>(std::clamp(roi_frac_, 0.55, 0.99));
         const int roi_w = static_cast<int>(src.cols * roi_f);
         const int roi_h = static_cast<int>(src.rows * roi_f);
@@ -518,6 +727,7 @@ private:
             return out;
         }
 
+        // 【2】可选数字变焦 + 伽马/CLAHE，让暗部色块更好分
         cv::Mat vis = src(safe).clone();
         const float zoom_use = static_cast<float>(std::clamp(center_roi_zoom_, 1.0, 1.6));
         center_crop_zoom_inplace(vis, zoom_use);
@@ -542,14 +752,17 @@ private:
             std::clamp(lys, 0.0f, static_cast<float>(std::max(1, vis.rows - 1))));
         const float laser_y_for_track = laser_center.y - static_cast<float>(pitch_laser_lift_px_);
 
+        const bool small_mode = is_small_mode_;
+        const int trace_cap = small_mode ? trace_proc_width_cap_small_ : trace_proc_width_cap_;
         cv::Mat work = vis;
         float scale = 1.0f;
-        if (vis.cols > trace_proc_width_cap_) {
-            scale = static_cast<float>(trace_proc_width_cap_) / static_cast<float>(vis.cols);
+        if (vis.cols > trace_cap) {
+            scale = static_cast<float>(trace_cap) / static_cast<float>(vis.cols);
             cv::resize(vis, work, cv::Size(), scale, scale, cv::INTER_AREA);
         }
 
-        const float lab_t = static_cast<float>(lab_thresh_);
+        // 【3】Lab 逐像素分 12 色，再 findContours 得到 blobs（调 lab_thresh 最关键）
+        const float lab_t = static_cast<float>(small_mode ? small_lab_thresh_ : lab_thresh_);
         cv::Mat lab_src = work;
         cv::Mat blur_store;
         if (lab_preprocess_blur_ksize_ >= 3) {
@@ -655,11 +868,16 @@ private:
         const double frame_area = static_cast<double>(work.cols) * static_cast<double>(work.rows);
 
         const double ccm = std::clamp(center_circularity_min_, 0.35, 0.85);
-        const CenterDiskGeomParams center_geom{
+        CenterDiskGeomParams center_geom{
             center_circle_area_ratio_min_,
             center_rect_area_ratio_max_,
             center_max_dist_ratio_,
             std::max(25.0, lab_min_area_seg_ * 0.35)};
+        if (small_mode) {
+            center_geom.center_max_dist_ratio =
+                std::clamp(small_center_hub_dist_frac_, 0.08, 0.60);
+        }
+        // 【4】几何 + 位置约束找中心圆，HSV 读准 track_id，再在扇区找同色方块
         Blob* disk = pick_center_disk_shape_first(blobs, opt_center, frame_area, work.cols, work.rows, ccm, center_geom);
         frame_center_lab_cid_ = disk ? disk->cid : -1;
 
@@ -669,33 +887,170 @@ private:
         if (disk) {
             track_id = classify_blob_mean_bgr_hsv_nearest(work, *disk, center_hsv_max_dist_sq_);
             if (track_id < 0) track_id = disk->cid;
-            sector = pick_sector_quad_same_hsv(
-                blobs, disk, track_id, work, sector_hsv_max_dist_sq_, sector_min_area_, sector_max_area_ratio_,
+            if (aim_workflow_enabled_ && aim_relock_requested_) {
+                locked_center_color_id_ = track_id;
+                center_color_candidate_ = track_id;
+                center_color_stable_count_ = std::max(1, color_lock_stable_frames_);
+                center_color_relock_miss_count_ = 0;
+                aim_relock_requested_ = false;
+            }
+            if (color_lock_enable_) {
+                if (locked_center_color_id_ < 0) {
+                    if (track_id == center_color_candidate_) {
+                        center_color_stable_count_++;
+                    } else {
+                        center_color_candidate_ = track_id;
+                        center_color_stable_count_ = 1;
+                    }
+                    center_color_miss_count_ = 0;
+                    if (center_color_stable_count_ >= std::max(1, color_lock_stable_frames_)) {
+                        locked_center_color_id_ = center_color_candidate_;
+                        center_color_relock_miss_count_ = 0;
+                    }
+                } else {
+                    // 已锁色后不做每帧重判，只有连续不一致达到阈值才重锁
+                    center_color_miss_count_ = 0;
+                    if (track_id == locked_center_color_id_) {
+                        center_color_relock_miss_count_ = 0;
+                    } else {
+                        center_color_relock_miss_count_++;
+                        if (center_color_relock_miss_count_ >= std::max(1, center_color_relock_after_miss_frames_)) {
+                            locked_center_color_id_ = track_id;
+                            center_color_candidate_ = track_id;
+                            center_color_stable_count_ = std::max(1, color_lock_stable_frames_);
+                            center_color_relock_miss_count_ = 0;
+                        }
+                    }
+                }
+            }
+        } else if (color_lock_enable_) {
+            center_color_stable_count_ = 0;
+            center_color_miss_count_ += 1;
+            if (center_color_miss_count_ > std::max(1, color_lock_timeout_frames_)) {
+                center_color_candidate_ = -1;
+                locked_center_color_id_ = -1;
+                center_color_relock_miss_count_ = 0;
+                color_only_active_ = false;
+            }
+        }
+
+        const int ref_track_id = (locked_center_color_id_ >= 0) ? locked_center_color_id_ : track_id;
+        if (!aim_workflow_enabled_ && color_only_after_lock_enable_ && locked_center_color_id_ >= 0 &&
+            center_color_stable_count_ >= std::max(1, color_only_arm_frames_)) {
+            color_only_active_ = true;
+        }
+        if (locked_center_color_id_ < 0) color_only_active_ = false;
+        bool has_center_anchor = false;
+        cv::Point2f center_anchor = opt_center;
+        double center_anchor_radius = 0.0;
+        if (disk) {
+            has_center_anchor = true;
+            center_anchor = cv::Point2f(static_cast<float>(disk->cx), static_cast<float>(disk->cy));
+            center_anchor_radius = std::sqrt(std::max(1.0, disk->area) / CV_PI);
+        } else if (track_.has_center) {
+            has_center_anchor = true;
+            center_anchor = cv::Point2f(track_.smooth_center.x * scale, track_.smooth_center.y * scale);
+            center_anchor_radius = std::sqrt(std::max(1.0, sector_min_area_) / CV_PI);
+        }
+
+        if (color_only_active_ && locked_center_color_id_ >= 0) {
+            // 小能量常用：中心色锁死后只追同色方块，中心圆丢了也能跟
+            sector = pick_largest_quad_for_color_hsv(
+                blobs, locked_center_color_id_, work, sector_hsv_max_dist_sq_, sector_min_area_, sector_max_area_ratio_,
                 frame_area, square_approx_poly_eps_);
-            orient_center_and_sector(cen_pick, sector, opt_center);
+            if (!sector) {
+                if (!disable_blob_fallback_) {
+                    sector = pick_largest_blob_for_color_hsv(
+                        blobs, locked_center_color_id_, work, sector_hsv_max_dist_sq_, std::max(24.0, sector_min_area_ * 0.6),
+                        fallback_blob_max_area_ratio_, frame_area, has_center_anchor, center_anchor, center_anchor_radius,
+                        fallback_blob_min_dist_center_radius_, fallback_blob_max_dist_center_radius_);
+                }
+            }
+            cen_pick = nullptr;
+            if (sector) {
+                color_only_miss_count_ = 0;
+            } else {
+                color_only_miss_count_ += 1;
+                if (color_only_miss_count_ > std::max(1, color_lock_timeout_frames_)) {
+                    color_only_active_ = false;
+                    locked_center_color_id_ = -1;
+                    center_color_candidate_ = -1;
+                    center_color_stable_count_ = 0;
+                }
+            }
+        } else {
+            color_only_miss_count_ = 0;
+            if (disk) {
+                const bool has_prefer_pt = sector_prefer_last_enable_ && has_last_sector_pick_;
+                sector = pick_sector_quad_same_hsv(
+                    blobs, disk, ref_track_id, work, sector_hsv_max_dist_sq_, sector_min_area_, sector_max_area_ratio_,
+                    frame_area, square_approx_poly_eps_, center_square_area_rel_tol_, center_square_diam_side_rel_tol_,
+                    square_max_dist_center_radius_, has_prefer_pt, last_sector_pick_work_,
+                    sector_prefer_radius_px_, sector_prefer_bonus_);
+                orient_center_and_sector(cen_pick, sector, opt_center);
+            } else if (locked_center_color_id_ >= 0 && !disable_blob_fallback_) {
+                sector = pick_largest_blob_for_color_hsv(
+                    blobs, locked_center_color_id_, work, sector_hsv_max_dist_sq_, std::max(24.0, sector_min_area_ * 0.6),
+                    fallback_blob_max_area_ratio_, frame_area, has_center_anchor, center_anchor, center_anchor_radius,
+                    fallback_blob_min_dist_center_radius_, fallback_blob_max_dist_center_radius_);
+            }
         }
 
         bool center_ref_valid = (cen_pick != nullptr);
         float center_ref_x = cen_pick ? static_cast<float>(cen_pick->cx) : 0.f;
         float center_ref_y = cen_pick ? static_cast<float>(cen_pick->cy) : 0.f;
-        int center_ref_cid = track_id;
+        int center_ref_cid = (locked_center_color_id_ >= 0) ? locked_center_color_id_ : track_id;
         float center_ref_rad =
             cen_pick ? std::max(10.0f, static_cast<float>(std::sqrt(std::max(1.0, cen_pick->area) / CV_PI))) : 0.f;
 
         Blob* target = sector;
+        if (aim_workflow_enabled_ && !aim_started_) {
+            // 未点击开始时只对准中心圆；同色方块继续识别用于可视化/锁色
+            target = cen_pick;
+            color_only_active_ = false;
+        }
+        const bool workflow_switched = (aim_started_ != last_aim_started_);
+        if (workflow_switched && stable_online_mode_) {
+            // 工作流切换时清控制状态，避免锁中心<->追方块切换瞬间冲击
+            ctrl_integ_ex_ = ctrl_integ_ey_ = 0.f;
+            ctrl_prev_ex_ = ctrl_prev_ey_ = 0.f;
+            ctrl_filt_ex_ = ctrl_filt_ey_ = 0.f;
+            stable_transition_countdown_ = std::max(0, stable_transition_blend_frames_);
+            track_.has_prev_raw = false;
+            vel_ema_ = cv::Point2f(0.f, 0.f);
+            model_vel_ = cv::Point2f(0.f, 0.f);
+            predict_armed_ = false;
+            predict_good_streak_ = 0;
+        }
+        last_aim_started_ = aim_started_;
         cv::Point2f center_pt(-1, -1), target_raw(-1, -1);
         if (center_ref_valid) {
             center_pt = cv::Point2f(center_ref_x / scale, center_ref_y / scale);
         }
         if (target) {
             target_raw = cv::Point2f(static_cast<float>(target->cx / scale), static_cast<float>(target->cy / scale));
+            stable_hold_count_ = 0;
+            stable_last_valid_target_ = target_raw;
+            stable_has_last_valid_target_ = true;
+        } else if (stable_online_mode_ && stable_has_last_valid_target_ &&
+                   stable_hold_count_ < std::max(0, stable_target_hold_frames_)) {
+            // 短时丢检保持上一目标，减少识别抖动直接注入控制环
+            target_raw = stable_last_valid_target_;
+            stable_hold_count_ += 1;
+        } else if (!target) {
+            stable_hold_count_ = 0;
+            stable_has_last_valid_target_ = false;
         }
 
-        const float dt = (current_fps_ > 1.0) ? (1.0f / static_cast<float>(current_fps_)) : (1.0f / 30.0f);
+        const float dt = stable_online_mode_
+                             ? static_cast<float>(stable_fixed_dt_s_)
+                             : ((current_fps_ > 1.0) ? (1.0f / static_cast<float>(current_fps_)) : (1.0f / 30.0f));
         const float alpha_track = 0.52f;
         const float alpha_recover = 0.46f;
         float target_step_max = static_cast<float>(target_step_max_px_);
         const float center_step_max = 42.0f;
+        const float lead_ms = static_cast<float>(small_mode ? small_lead_ms_ : predict_lead_ms_);
+        const float lead_s = std::clamp(lead_ms / 1000.0f, 0.0f, 0.35f);
 
         if (center_pt.x >= 0.0f) {
             if (!track_.has_center) {
@@ -716,15 +1071,46 @@ private:
         if (target_raw.x >= 0.0f) {
             const int lost_before = track_.miss_count;
             track_.miss_count = 0;
-            cv::Point2f pred = target_raw;
-            cv::Point2f inst{(target_raw.x - track_.prev_raw.x) / std::max(1e-4f, dt),
-                (target_raw.y - track_.prev_raw.y) / std::max(1e-4f, dt)};
+            cv::Point2f inst{0.f, 0.f};
+            if (track_.has_prev_raw) {
+                inst.x = (target_raw.x - track_.prev_raw.x) / std::max(1e-4f, dt);
+                inst.y = (target_raw.y - track_.prev_raw.y) / std::max(1e-4f, dt);
+            }
             inst.x = std::clamp(inst.x, -950.0f, 950.0f);
             inst.y = std::clamp(inst.y, -950.0f, 950.0f);
             const float vb = static_cast<float>(predict_vel_beta_);
             vel_ema_.x = vb * inst.x + (1.0f - vb) * vel_ema_.x;
             vel_ema_.y = vb * inst.y + (1.0f - vb) * vel_ema_.y;
 
+            cv::Point2f model_vel = vel_ema_;
+            if (small_mode && small_known_speed_predict_enable_ && center_ref_valid) {
+                cv::Point2f base_target = track_.has_smooth_target ? track_.smooth_target : target_raw;
+                cv::Point2f radial = base_target - cv::Point2f(center_ref_x / scale, center_ref_y / scale);
+                float rr = std::hypot(radial.x, radial.y);
+                if (rr < 1e-3f) rr = 1.0f;
+                cv::Point2f tang(-radial.y / rr, radial.x / rr);
+                const float omega = static_cast<float>(small_known_speed_deg_s_ * CV_PI / 180.0);
+                const float pix_speed = rr * omega;
+                const float dir = (small_known_speed_dir_sign_ >= 0) ? 1.0f : -1.0f;
+                cv::Point2f model_known = dir * pix_speed * tang;
+                const float mb = static_cast<float>(std::clamp(small_known_speed_blend_, 0.0, 1.0));
+                model_vel = (1.0f - mb) * model_vel + mb * model_known;
+            }
+            model_vel_ = model_vel;
+            cv::Point2f model_predict = target_raw + model_vel * lead_s;
+            model_predict.x = std::clamp(model_predict.x, 0.0f, static_cast<float>(vis.cols - 1));
+            model_predict.y = std::clamp(model_predict.y, 0.0f, static_cast<float>(vis.rows - 1));
+            last_model_predict_ = model_predict;
+
+            cv::Point2f fused_meas = target_raw;
+            if (track_state_ == TrackControlState::REACQUIRE || lost_before > 0) {
+                fused_meas = 0.60f * target_raw + 0.40f * last_model_predict_;
+            } else if (small_mode) {
+                fused_meas = 0.70f * target_raw + 0.30f * model_predict;
+            }
+            vel_ema_ = 0.60f * vel_ema_ + 0.40f * model_vel;
+
+            cv::Point2f pred = fused_meas;
             if (track_.has_smooth_target) {
                 const cv::Point2f dp = pred - track_.smooth_target;
                 const float dpm = std::hypot(dp.x, dp.y);
@@ -741,7 +1127,7 @@ private:
                 track_.has_smooth_target = true;
             } else {
                 float a = (lost_before > 0) ? alpha_recover : alpha_track;
-                const float el = std::hypot(target_raw.x - laser_center.x, target_raw.y - laser_y_for_track);
+                const float el = std::hypot(fused_meas.x - laser_center.x, fused_meas.y - laser_y_for_track);
                 const float jump_thresh = 82.0f;
                 const cv::Point2f djump = pred - track_.smooth_target;
                 const float ej = std::hypot(djump.x, djump.y);
@@ -765,59 +1151,106 @@ private:
             if (predict_good_streak_ >= predict_arm_frames_) predict_armed_ = true;
         } else if (track_.has_smooth_target) {
             track_.miss_count += 1;
-            const float vel_m = std::hypot(vel_ema_.x, vel_ema_.y);
-            const bool in_miss_window =
-                predict_armed_ && track_.miss_count <= predict_coast_frames_;
-            const bool sq_coast = in_miss_window && vel_m > 0.22f;
+            const float vel_m = std::hypot(model_vel_.x, model_vel_.y);
+            const bool in_miss_window = predict_armed_ && track_.miss_count <= predict_coast_frames_;
+            const bool sq_coast = in_miss_window && vel_m > 0.12f;
             if (sq_coast) {
-                const float ple = static_cast<float>(predict_lead_ms_) / 1000.0f;
-                cv::Point2f st = track_.smooth_target + vel_ema_ * ple;
+                cv::Point2f st = track_.smooth_target + model_vel_ * lead_s;
                 st.x = std::clamp(st.x, 0.0f, static_cast<float>(vis.cols - 1));
                 st.y = std::clamp(st.y, 0.0f, static_cast<float>(vis.rows - 1));
-                track_.smooth_target = 0.58f * st + 0.42f * track_.smooth_target;
-                vel_ema_.x *= 0.988f;
-                vel_ema_.y *= 0.988f;
+                last_model_predict_ = st;
+                track_.smooth_target = st;
+                model_vel_.x *= 0.98f;
+                model_vel_.y *= 0.98f;
             } else if (!in_miss_window) {
                 track_.has_prev_raw = false;
                 predict_armed_ = false;
                 predict_good_streak_ = 0;
                 vel_ema_.x = vel_ema_.y = 0.f;
+                model_vel_.x = model_vel_.y = 0.f;
             }
         }
 
         const bool allow_predict_coast =
-            predict_armed_ && target_raw.x < 0.0f && track_.has_smooth_target && track_.miss_count > 0 &&
-            track_.miss_count <= predict_coast_frames_;
+            (!stable_online_mode_ || !stable_disable_predict_) && predict_armed_ && target_raw.x < 0.0f &&
+            track_.has_smooth_target && track_.miss_count > 0 && track_.miss_count <= predict_coast_frames_;
 
         const cv::Point2f target_point = track_.has_smooth_target ? track_.smooth_target : laser_center;
         const int x_error = static_cast<int>(std::lround(target_point.x - laser_center.x));
         const int y_error = static_cast<int>(std::lround(target_point.y - laser_y_for_track));
         const float hit_error_px = std::sqrt(static_cast<float>(x_error * x_error + y_error * y_error));
 
+        const bool detect_ok_fresh = (target != nullptr);
         const bool detect_ok_control = (target_raw.x >= 0.0f);
-        if (detect_ok_control) {
+        if (detect_ok_fresh) {
             acquire_lost_frames_ = 0;
         } else if (!allow_predict_coast) {
             acquire_lost_frames_++;
         }
 
-        const bool search_mode =
+        // 工作流约束：未开始追方块前，中心圆一旦锁定就冻结云台，不再旋转
+        const bool hold_on_center_locked =
+            aim_workflow_enabled_ && !aim_started_ && (locked_center_color_id_ >= 0) && center_ref_valid;
+
+        bool search_mode =
             !allow_predict_coast && ((track_.miss_count >= 3) || (acquire_lost_frames_ >= search_enter_frames_));
+        if (stable_online_mode_ && stable_disable_search_) {
+            search_mode = false;
+        }
+        if (hold_on_center_locked) {
+            search_mode = false;
+        }
+        if (detect_ok_control) {
+            if (track_state_ == TrackControlState::COASTING || track_state_ == TrackControlState::SEARCH) {
+                track_state_ = TrackControlState::REACQUIRE;
+                reacquire_countdown_ = std::max(1, reacquire_blend_frames_);
+            } else if (track_state_ == TrackControlState::REACQUIRE) {
+                reacquire_countdown_ = std::max(0, reacquire_countdown_ - 1);
+                if (reacquire_countdown_ <= 0) track_state_ = TrackControlState::TRACKING;
+            } else {
+                track_state_ = TrackControlState::TRACKING;
+            }
+        } else if (allow_predict_coast) {
+            track_state_ = TrackControlState::COASTING;
+        } else if (search_mode) {
+            track_state_ = TrackControlState::SEARCH;
+        }
+        search_mode = (track_state_ == TrackControlState::SEARCH);
 
-        settle_ok_count_ =
-            (detect_ok_control && hit_error_px <= static_cast<float>(settle_px_)) ? (settle_ok_count_ + 1) : 0;
-        const bool should_hold = (settle_ok_count_ >= settle_frames_);
+        const double settle_px_active = small_mode ? small_settle_px_ : settle_px_;
+        const int settle_frames_active = small_mode ? small_settle_frames_ : settle_frames_;
+        settle_ok_count_ = (detect_ok_control && hit_error_px <= static_cast<float>(settle_px_active))
+                               ? (settle_ok_count_ + 1)
+                               : 0;
+        const bool should_hold = (settle_ok_count_ >= settle_frames_active) || hold_on_center_locked;
 
-        float kp_pitch = static_cast<float>(kp_);
+        float kp_pitch = static_cast<float>(small_mode ? small_kp_ : kp_);
         float kp_yaw = kp_pitch * static_cast<float>(yaw_kp_mult_);
-        float kd_yaw = static_cast<float>(kd_);
+        float kd_yaw = static_cast<float>(small_mode ? small_kd_ : kd_);
         float kd_pitch = kd_yaw;
-        float beta_ex = static_cast<float>(err_lp_beta_yaw_);
-        float beta_ey = static_cast<float>(err_lp_beta_pitch_);
-        float max_delta_pitch_deg = static_cast<float>(max_delta_deg_);
+        float beta_ex = static_cast<float>(small_mode ? small_err_lp_beta_yaw_ : err_lp_beta_yaw_);
+        float beta_ey = static_cast<float>(small_mode ? small_err_lp_beta_pitch_ : err_lp_beta_pitch_);
+        float max_delta_pitch_deg = static_cast<float>(small_mode ? small_max_delta_deg_ : max_delta_deg_);
         float max_delta_yaw_deg = max_delta_pitch_deg;
-        int deadband_pitch = deadband_px_;
+        int deadband_pitch = small_mode ? small_deadband_ : deadband_px_;
         int deadband_yaw = std::max(1, std::min(deadband_pitch, deadband_yaw_px_));
+        float min_step_active = static_cast<float>(small_mode ? small_min_step_deg_ : yaw_min_step_deg_);
+        if (runtime_tuning_enable_ && stable_online_mode_) {
+            kp_pitch = static_cast<float>(rt_kp_);
+            kp_yaw = kp_pitch * static_cast<float>(yaw_kp_mult_);
+            kd_yaw = static_cast<float>(rt_kd_);
+            kd_pitch = kd_yaw;
+            beta_ex = static_cast<float>(rt_err_lp_beta_);
+            beta_ey = static_cast<float>(rt_err_lp_beta_);
+            max_delta_pitch_deg = static_cast<float>(rt_max_delta_deg_);
+            max_delta_yaw_deg = max_delta_pitch_deg;
+            deadband_pitch = std::max(0, static_cast<int>(std::lround(rt_deadband_px_)));
+            deadband_yaw = std::max(1, std::min(deadband_pitch, deadband_yaw_px_));
+            min_step_active = static_cast<float>(rt_min_step_deg_);
+            servo_angle_smooth_beta_ = rt_servo_smooth_beta_;
+            stable_target_hold_frames_ = rt_hold_frames_;
+            stable_transition_blend_frames_ = rt_transition_frames_;
+        }
 
         float yaw_lo = static_cast<float>(servo_yaw_min_deg_);
         float yaw_hi = static_cast<float>(servo_yaw_max_deg_);
@@ -828,12 +1261,20 @@ private:
             const float h = static_cast<float>(servo_yaw_travel_half_span_deg_);
             yaw_lo = std::max(yaw_lo, c - h);
             yaw_hi = std::min(yaw_hi, c + h);
+        } else {
+            const float c = static_cast<float>(init_yaw_deg_);
+            yaw_lo = std::max(yaw_lo, c - static_cast<float>(std::max(0.0, servo_yaw_travel_neg_deg_)));
+            yaw_hi = std::min(yaw_hi, c + static_cast<float>(std::max(0.0, servo_yaw_travel_pos_deg_)));
         }
         if (servo_pitch_travel_half_span_deg_ > 0.5) {
             const float c = static_cast<float>(init_pitch_deg_);
             const float h = static_cast<float>(servo_pitch_travel_half_span_deg_);
             pitch_lo = std::max(pitch_lo, c - h);
             pitch_hi = std::min(pitch_hi, c + h);
+        } else {
+            const float c = static_cast<float>(init_pitch_deg_);
+            pitch_lo = std::max(pitch_lo, c - static_cast<float>(std::max(0.0, servo_pitch_travel_neg_deg_)));
+            pitch_hi = std::min(pitch_hi, c + static_cast<float>(std::max(0.0, servo_pitch_travel_pos_deg_)));
         }
         if (yaw_lo > yaw_hi) std::swap(yaw_lo, yaw_hi);
         if (pitch_lo > pitch_hi) std::swap(pitch_lo, pitch_hi);
@@ -857,8 +1298,8 @@ private:
         ctrl_prev_ex_ = ctrl_filt_ex_;
         ctrl_prev_ey_ = ctrl_filt_ey_;
 
-        float ki_yaw = static_cast<float>(ki_yaw_) * static_cast<float>(yaw_kp_mult_);
-        float ki_pitch = static_cast<float>(ki_pitch_);
+        float ki_yaw = static_cast<float>(small_mode ? small_ki_yaw_ : ki_yaw_) * static_cast<float>(yaw_kp_mult_);
+        float ki_pitch = static_cast<float>(small_mode ? small_ki_pitch_ : ki_pitch_);
         const bool integ_run = detect_ok_control && !search_mode && !should_hold;
         if (integ_run) {
             ctrl_integ_ex_ += ctrl_filt_ex_ * dt;
@@ -886,6 +1327,14 @@ private:
         u_yaw *= static_cast<float>(yaw_gain_);
         u_yaw = std::clamp(u_yaw, -max_delta_yaw_deg, max_delta_yaw_deg);
         u_pitch = std::clamp(u_pitch, -max_delta_pitch_deg, max_delta_pitch_deg);
+        if (stable_online_mode_ && stable_transition_countdown_ > 0) {
+            const float s = static_cast<float>(stable_transition_countdown_) /
+                            static_cast<float>(std::max(1, stable_transition_blend_frames_));
+            const float blend_scale = std::clamp(1.0f - 0.55f * s, 0.35f, 1.0f);
+            u_yaw *= blend_scale;
+            u_pitch *= blend_scale;
+            stable_transition_countdown_ -= 1;
+        }
 
         static float search_phase_yaw = 0.f;
         static float search_phase_pitch = 0.f;
@@ -926,7 +1375,7 @@ private:
                 }
             }
         } else {
-            const float min_step_y = static_cast<float>(yaw_min_step_deg_);
+            const float min_step_y = min_step_active;
             if (std::abs(u_yaw) < min_step_y && std::abs(ctrl_filt_ex_) > static_cast<float>(deadband_yaw) + 1e-3f) {
                 u_yaw = (ctrl_filt_ex_ > 0.0f) ? -min_step_y : min_step_y;
             }
@@ -1009,12 +1458,21 @@ private:
                 " tid=" + std::to_string(target_id),
             cv::Point(10, 144), cv::FONT_HERSHEY_SIMPLEX, 0.6,
             detect_ok ? cv::Scalar(0, 255, 120) : cv::Scalar(0, 140, 255), 2);
+        if (aim_workflow_enabled_) {
+            cv::putText(
+                vis, aim_started_ ? "AIM:TRACK_SQUARE" : "AIM:LOCK_CENTER",
+                cv::Point(10, 216), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 0), 2);
+        }
+        if (color_only_active_) {
+            cv::putText(vis, "COLOR_ONLY", cv::Point(10, 192), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 220, 255), 2);
+        }
         cv::putText(vis,
             "miss=" + std::to_string(track_.miss_count) + " acq=" + std::to_string(acquire_lost_frames_) +
                 (allow_predict_coast ? " COAST" : "") + (search_mode ? " SEARCH" : "") +
                 " blobs=" + std::to_string(static_cast<int>(blobs.size())),
             cv::Point(10, 168), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 220, 0), 2);
 
+        // 【5】整度化后发到 /servo_control；终端里能看到「发布舵机指令」就说明链路通了
         int pitch_cmd = wrap_deg_0_359(safe_round_servo_deg(servo_pitch_f));
         int yaw_cmd = wrap_deg_0_359(safe_round_servo_deg(servo_yaw_f));
         pitch_cmd = std::clamp(pitch_cmd, static_cast<int>(std::floor(pitch_lo)), static_cast<int>(std::ceil(pitch_hi)));
@@ -1095,9 +1553,11 @@ private:
                     if (!vis_window_ready) {
                         cv::namedWindow("Received Image", cv::WINDOW_NORMAL);
                         cv::resizeWindow("Received Image", std::max(320, vis.cols), std::max(240, vis.rows));
+                        if (runtime_tuning_enable_) init_runtime_tuning_panel_();
                         vis_window_ready = true;
                         RCLCPP_INFO(this->get_logger(), "[TRACE] OpenCV 窗口 Received Image");
                     }
+                    if (runtime_tuning_enable_) refresh_runtime_tuning_from_panel_();
                     cv::imshow("Received Image", vis);
                     if (static_cast<char>(cv::waitKey(1)) == 27) rclcpp::shutdown();
                 } catch (const cv::Exception& e) {
@@ -1105,6 +1565,13 @@ private:
                     RCLCPP_ERROR(this->get_logger(), "OpenCV GUI: %s", e.what());
                 }
             }
+        }
+        if (sector) {
+            last_sector_pick_work_ = cv::Point2f(static_cast<float>(sector->cx), static_cast<float>(sector->cy));
+            has_last_sector_pick_ = true;
+        } else if (!color_only_active_) {
+            // 在普通路径下连续丢失时释放粘滞，避免长期锁死在旧区域。
+            has_last_sector_pick_ = false;
         }
 
         return out;
@@ -1130,6 +1597,51 @@ private:
         }
     }
 
+    void init_runtime_tuning_panel_() {
+        if (panel_inited_) return;
+        cv::createTrackbar("rt_kp x1000", "Received Image", &tb_kp_x1000_, 120);
+        cv::createTrackbar("rt_kd x1000", "Received Image", &tb_kd_x1000_, 120);
+        cv::createTrackbar("rt_max_delta x100", "Received Image", &tb_max_delta_x100_, 300);
+        cv::createTrackbar("rt_min_step x100", "Received Image", &tb_min_step_x100_, 100);
+        cv::createTrackbar("rt_deadband px", "Received Image", &tb_deadband_px_, 40);
+        cv::createTrackbar("rt_errlp x100", "Received Image", &tb_errlp_x100_, 100);
+        cv::createTrackbar("rt_smooth x100", "Received Image", &tb_smooth_x100_, 100);
+        cv::createTrackbar("rt_hold_frames", "Received Image", &tb_hold_frames_, 12);
+        cv::createTrackbar("rt_trans_frames", "Received Image", &tb_trans_frames_, 20);
+        tb_kp_x1000_ = std::clamp(static_cast<int>(std::lround(rt_kp_ * 1000.0)), 0, 120);
+        tb_kd_x1000_ = std::clamp(static_cast<int>(std::lround(rt_kd_ * 1000.0)), 0, 120);
+        tb_max_delta_x100_ = std::clamp(static_cast<int>(std::lround(rt_max_delta_deg_ * 100.0)), 0, 300);
+        tb_min_step_x100_ = std::clamp(static_cast<int>(std::lround(rt_min_step_deg_ * 100.0)), 0, 100);
+        tb_deadband_px_ = std::clamp(static_cast<int>(std::lround(rt_deadband_px_)), 0, 40);
+        tb_errlp_x100_ = std::clamp(static_cast<int>(std::lround(rt_err_lp_beta_ * 100.0)), 0, 100);
+        tb_smooth_x100_ = std::clamp(static_cast<int>(std::lround(rt_servo_smooth_beta_ * 100.0)), 5, 95);
+        tb_hold_frames_ = std::clamp(rt_hold_frames_, 0, 12);
+        tb_trans_frames_ = std::clamp(rt_transition_frames_, 0, 20);
+        cv::setTrackbarPos("rt_kp x1000", "Received Image", tb_kp_x1000_);
+        cv::setTrackbarPos("rt_kd x1000", "Received Image", tb_kd_x1000_);
+        cv::setTrackbarPos("rt_max_delta x100", "Received Image", tb_max_delta_x100_);
+        cv::setTrackbarPos("rt_min_step x100", "Received Image", tb_min_step_x100_);
+        cv::setTrackbarPos("rt_deadband px", "Received Image", tb_deadband_px_);
+        cv::setTrackbarPos("rt_errlp x100", "Received Image", tb_errlp_x100_);
+        cv::setTrackbarPos("rt_smooth x100", "Received Image", tb_smooth_x100_);
+        cv::setTrackbarPos("rt_hold_frames", "Received Image", tb_hold_frames_);
+        cv::setTrackbarPos("rt_trans_frames", "Received Image", tb_trans_frames_);
+        panel_inited_ = true;
+    }
+
+    void refresh_runtime_tuning_from_panel_() {
+        if (!panel_inited_) return;
+        rt_kp_ = std::clamp(tb_kp_x1000_ / 1000.0, 0.0, 0.12);
+        rt_kd_ = std::clamp(tb_kd_x1000_ / 1000.0, 0.0, 0.12);
+        rt_max_delta_deg_ = std::clamp(tb_max_delta_x100_ / 100.0, 0.0, 3.0);
+        rt_min_step_deg_ = std::clamp(tb_min_step_x100_ / 100.0, 0.0, 1.0);
+        rt_deadband_px_ = std::clamp(static_cast<double>(tb_deadband_px_), 0.0, 40.0);
+        rt_err_lp_beta_ = std::clamp(tb_errlp_x100_ / 100.0, 0.0, 1.0);
+        rt_servo_smooth_beta_ = std::clamp(tb_smooth_x100_ / 100.0, 0.05, 0.95);
+        rt_hold_frames_ = std::clamp(tb_hold_frames_, 0, 12);
+        rt_transition_frames_ = std::clamp(tb_trans_frames_, 0, 20);
+    }
+
     image_transport::Subscriber image_sub_;
     image_transport::Publisher trace_debug_pub_;
     std::string trace_debug_image_topic_;
@@ -1137,11 +1649,34 @@ private:
     rclcpp::Publisher<ServoMsg>::SharedPtr servo_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr tracking_debug_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr center_color_pub_;
+    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr aim_command_sub_;
     bool publish_tracking_debug_ = true;
     bool show_vis_window_ = true;
+    bool runtime_tuning_enable_ = true;
+    bool panel_inited_ = false;
+    int tb_kp_x1000_ = 13;
+    int tb_kd_x1000_ = 12;
+    int tb_max_delta_x100_ = 50;
+    int tb_min_step_x100_ = 18;
+    int tb_deadband_px_ = 12;
+    int tb_errlp_x100_ = 42;
+    int tb_smooth_x100_ = 32;
+    int tb_hold_frames_ = 3;
+    int tb_trans_frames_ = 5;
+    double rt_kp_ = 0.013;
+    double rt_kd_ = 0.012;
+    double rt_max_delta_deg_ = 0.50;
+    double rt_min_step_deg_ = 0.18;
+    double rt_deadband_px_ = 12.0;
+    double rt_err_lp_beta_ = 0.42;
+    double rt_servo_smooth_beta_ = 0.32;
+    int rt_hold_frames_ = 3;
+    int rt_transition_frames_ = 5;
     rclcpp::Time last_frame_time_;
     int frame_count_ = 0;
     double current_fps_ = 30.0;
+    std::string energy_mode_{"large"};
+    bool is_small_mode_ = false;
     bool control_enabled_ = true;
     double last_no_image_warn_sec_{-1e9};
     double laser_center_ratio_x_ = 0.5;
@@ -1160,8 +1695,14 @@ private:
     double servo_yaw_max_deg_ = 360.0;
     double servo_pitch_travel_half_span_deg_ = 40.0;
     double servo_yaw_travel_half_span_deg_ = 40.0;
+    double servo_pitch_travel_pos_deg_ = 30.0;
+    double servo_pitch_travel_neg_deg_ = 10.0;
+    double servo_yaw_travel_pos_deg_ = 20.0;
+    double servo_yaw_travel_neg_deg_ = 20.0;
     int trace_proc_width_cap_ = 960;
+    int trace_proc_width_cap_small_ = 880;
     double lab_thresh_ = 71.5;
+    double small_lab_thresh_ = 58.0;
     int lab_preprocess_blur_ksize_ = 15;
     int lab_mask_morph_ksize_ = 5;
     double vis_input_gamma_ = 0.76;
@@ -1176,20 +1717,33 @@ private:
     double kd_ = 0.022;
     double ki_yaw_ = 0.0;
     double ki_pitch_ = 0.0;
+    double small_kp_ = 0.013;
+    double small_kd_ = 0.012;
+    double small_ki_yaw_ = 0.0;
+    double small_ki_pitch_ = 0.0;
     double err_lp_beta_yaw_ = 0.52;
     double err_lp_beta_pitch_ = 0.30;
+    double small_err_lp_beta_yaw_ = 0.46;
+    double small_err_lp_beta_pitch_ = 0.42;
     int deadband_px_ = 2;
     int deadband_yaw_px_ = 1;
-    double max_delta_deg_ = 1.05;
-    double yaw_gain_ = 1.58;
-    double yaw_kp_mult_ = 1.75;
+    double max_delta_deg_ = 1.20;
+    int small_deadband_ = 12;
+    double small_max_delta_deg_ = 0.50;
+    double yaw_gain_ = 1.72;
+    double yaw_kp_mult_ = 1.90;
     double yaw_min_step_deg_ = 0.52;
+    double small_min_step_deg_ = 0.18;
+    double small_lead_ms_ = 28.0;
+    double small_settle_px_ = 14.0;
+    int small_settle_frames_ = 5;
     double near_tgt_yaw_kp_scale_ = 0.92;
     double search_yaw_amp_deg_ = 32.0;
     double search_pitch_amp_deg_ = 12.0;
     double search_phase_step_ = 0.10;
     double search_pitch_phase_step_ = 0.035;
     int search_enter_frames_ = 2;
+    double small_center_hub_dist_frac_ = 0.32;
     double settle_px_ = 8.0;
     int settle_frames_ = 4;
     int settle_ok_count_ = 0;
@@ -1210,6 +1764,14 @@ private:
     double predict_lead_ms_ = 62.0;
     int predict_arm_frames_ = 8;
     double predict_vel_beta_ = 0.28;
+    bool small_known_speed_predict_enable_ = true;
+    double small_known_speed_deg_s_ = 60.0;
+    int small_known_speed_dir_sign_ = 1;
+    double small_known_speed_blend_ = 0.68;
+    bool color_lock_enable_ = true;
+    int color_lock_stable_frames_ = 4;
+    int color_lock_timeout_frames_ = 36;
+    int reacquire_blend_frames_ = 2;
     bool predict_armed_ = false;
     int predict_good_streak_ = 0;
     double lab_min_area_seg_ = 50.0;
@@ -1225,6 +1787,47 @@ private:
     bool publish_center_color_id_ = true;
     int frame_center_lab_cid_ = -1;
     int acquire_lost_frames_ = 0;
+    int center_color_stable_count_ = 0;
+    int center_color_miss_count_ = 0;
+    int center_color_relock_miss_count_ = 0;
+    int center_color_candidate_ = -1;
+    int locked_center_color_id_ = -1;
+    int center_color_relock_after_miss_frames_ = 10;
+    bool color_only_after_lock_enable_ = true;
+    int color_only_arm_frames_ = 6;
+    bool disable_blob_fallback_ = true;
+    bool color_only_active_ = false;
+    int color_only_miss_count_ = 0;
+    double fallback_blob_max_area_ratio_ = 0.10;
+    double fallback_blob_min_dist_center_radius_ = 0.35;
+    double fallback_blob_max_dist_center_radius_ = 3.0;
+    bool aim_workflow_enabled_ = false;
+    bool aim_started_ = false;
+    bool aim_relock_requested_ = false;
+    bool last_aim_started_ = false;
+    bool stable_online_mode_ = true;
+    int stable_target_hold_frames_ = 3;
+    int stable_transition_blend_frames_ = 5;
+    int stable_transition_countdown_ = 0;
+    bool stable_disable_predict_ = true;
+    bool stable_disable_search_ = true;
+    double stable_fixed_dt_s_ = 0.04;
+    bool stable_has_last_valid_target_ = false;
+    int stable_hold_count_ = 0;
+    cv::Point2f stable_last_valid_target_{0.f, 0.f};
+    double center_square_area_rel_tol_ = 0.45;
+    double center_square_diam_side_rel_tol_ = 0.35;
+    double square_max_dist_center_radius_ = 2.8;
+    bool sector_prefer_last_enable_ = true;
+    double sector_prefer_radius_px_ = 85.0;
+    double sector_prefer_bonus_ = 0.35;
+    bool has_last_sector_pick_ = false;
+    cv::Point2f last_sector_pick_work_{0.f, 0.f};
+    int reacquire_countdown_ = 0;
+    enum class TrackControlState { TRACKING = 0, COASTING = 1, REACQUIRE = 2, SEARCH = 3 };
+    TrackControlState track_state_ = TrackControlState::SEARCH;
+    cv::Point2f last_model_predict_{0.f, 0.f};
+    cv::Point2f model_vel_{0.f, 0.f};
     TrackState track_;
     cv::Point2f vel_ema_{0.f, 0.f};
     float ctrl_prev_ex_ = 0.f;
@@ -1246,3 +1849,4 @@ int main(int argc, char* argv[]) {
     rclcpp::shutdown();
     return 0;
 }
+

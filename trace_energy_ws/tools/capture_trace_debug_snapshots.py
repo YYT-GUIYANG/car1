@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 从话题 /trace_debug_image 订阅最多 wait_sec 秒，保存两张处理后的图（BGR8）。

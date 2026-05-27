@@ -22,6 +22,12 @@ def generate_launch_description():
     clahe_l_clip_limit = LaunchConfiguration("clahe_l_clip_limit")
     gray_world_wb_enabled = LaunchConfiguration("gray_world_wb_enabled")
     gray_world_wb_strength = LaunchConfiguration("gray_world_wb_strength")
+    camera_v4l_auto_exposure = LaunchConfiguration("camera_v4l_auto_exposure")
+    camera_v4l_set_exposure = LaunchConfiguration("camera_v4l_set_exposure")
+    camera_v4l_exposure = LaunchConfiguration("camera_v4l_exposure")
+    camera_v4l_auto_wb = LaunchConfiguration("camera_v4l_auto_wb")
+    camera_v4l_wb_temperature = LaunchConfiguration("camera_v4l_wb_temperature")
+    camera_v4l_gain = LaunchConfiguration("camera_v4l_gain")
     servo_baudrate = LaunchConfiguration("servo_baudrate")
     small_lead_ms = LaunchConfiguration("small_lead_ms")
     small_kp = LaunchConfiguration("small_kp")
@@ -42,6 +48,10 @@ def generate_launch_description():
     large_square_predict_arm_frames = LaunchConfiguration("large_square_predict_arm_frames")
     large_square_predict_vel_beta = LaunchConfiguration("large_square_predict_vel_beta")
     small_center_hub_dist_frac = LaunchConfiguration("small_center_hub_dist_frac")
+    small_color_only_after_lock_enable = LaunchConfiguration("small_color_only_after_lock_enable")
+    small_color_only_arm_frames = LaunchConfiguration("small_color_only_arm_frames")
+    center_color_relock_after_miss_frames = LaunchConfiguration("center_color_relock_after_miss_frames")
+    disable_blob_fallback = LaunchConfiguration("disable_blob_fallback")
     small_search_enter_frames = LaunchConfiguration("small_search_enter_frames")
     small_search_yaw_amp_deg = LaunchConfiguration("small_search_yaw_amp_deg")
     small_search_pitch_amp_deg = LaunchConfiguration("small_search_pitch_amp_deg")
@@ -74,12 +84,25 @@ def generate_launch_description():
     startup_hold_frames = LaunchConfiguration("startup_hold_frames")
     publish_tracking_debug = LaunchConfiguration("publish_tracking_debug")
     show_vis_window = LaunchConfiguration("show_vis_window")
+    runtime_tuning_enable = LaunchConfiguration("runtime_tuning_enable")
     aim_workflow_enabled = LaunchConfiguration("aim_workflow_enabled")
+    stable_online_mode = LaunchConfiguration("stable_online_mode")
+    stable_target_hold_frames = LaunchConfiguration("stable_target_hold_frames")
+    stable_transition_blend_frames = LaunchConfiguration("stable_transition_blend_frames")
+    stable_disable_predict = LaunchConfiguration("stable_disable_predict")
+    stable_disable_search = LaunchConfiguration("stable_disable_search")
+    stable_fixed_dt_s = LaunchConfiguration("stable_fixed_dt_s")
     large_purple_family_match = LaunchConfiguration("large_purple_family_match")
     launch_aim_panel = LaunchConfiguration("launch_aim_panel")
     large_blob_hsv_relabel = LaunchConfiguration("large_blob_hsv_relabel")
     large_blob_hsv_max_dist_sq = LaunchConfiguration("large_blob_hsv_max_dist_sq")
     large_center_shape_first = LaunchConfiguration("large_center_shape_first")
+    center_square_area_rel_tol = LaunchConfiguration("center_square_area_rel_tol")
+    center_square_diam_side_rel_tol = LaunchConfiguration("center_square_diam_side_rel_tol")
+    square_max_dist_center_radius = LaunchConfiguration("square_max_dist_center_radius")
+    fallback_blob_max_area_ratio = LaunchConfiguration("fallback_blob_max_area_ratio")
+    fallback_blob_min_dist_center_radius = LaunchConfiguration("fallback_blob_min_dist_center_radius")
+    fallback_blob_max_dist_center_radius = LaunchConfiguration("fallback_blob_max_dist_center_radius")
     center_circularity_min = LaunchConfiguration("center_circularity_min")
     large_center_hsv_max_dist_sq = LaunchConfiguration("large_center_hsv_max_dist_sq")
     large_square_min_contour_area = LaunchConfiguration("large_square_min_contour_area")
@@ -119,6 +142,10 @@ def generate_launch_description():
     lab_canny_bridge_mask_dilate = LaunchConfiguration("lab_canny_bridge_mask_dilate")
     servo_pitch_travel_half_span_deg = LaunchConfiguration("servo_pitch_travel_half_span_deg")
     servo_yaw_travel_half_span_deg = LaunchConfiguration("servo_yaw_travel_half_span_deg")
+    servo_pitch_travel_pos_deg = LaunchConfiguration("servo_pitch_travel_pos_deg")
+    servo_pitch_travel_neg_deg = LaunchConfiguration("servo_pitch_travel_neg_deg")
+    servo_yaw_travel_pos_deg = LaunchConfiguration("servo_yaw_travel_pos_deg")
+    servo_yaw_travel_neg_deg = LaunchConfiguration("servo_yaw_travel_neg_deg")
     servo_angle_smooth_beta = LaunchConfiguration("servo_angle_smooth_beta")
     show_image_view = LaunchConfiguration("show_image_view")
     show_trace_debug_image_view = LaunchConfiguration("show_trace_debug_image_view")
@@ -140,6 +167,12 @@ def generate_launch_description():
             "clahe_l_clip_limit": clahe_l_clip_limit,
             "gray_world_wb_enabled": gray_world_wb_enabled,
             "gray_world_wb_strength": gray_world_wb_strength,
+            "camera_v4l_auto_exposure": camera_v4l_auto_exposure,
+            "camera_v4l_set_exposure": camera_v4l_set_exposure,
+            "camera_v4l_exposure": camera_v4l_exposure,
+            "camera_v4l_auto_wb": camera_v4l_auto_wb,
+            "camera_v4l_wb_temperature": camera_v4l_wb_temperature,
+            "camera_v4l_gain": camera_v4l_gain,
         }],
         output='both',  
     )   
@@ -176,6 +209,10 @@ def generate_launch_description():
             "large_square_predict_arm_frames": large_square_predict_arm_frames,
             "large_square_predict_vel_beta": large_square_predict_vel_beta,
             "small_center_hub_dist_frac": small_center_hub_dist_frac,
+            "small_color_only_after_lock_enable": small_color_only_after_lock_enable,
+            "small_color_only_arm_frames": small_color_only_arm_frames,
+            "center_color_relock_after_miss_frames": center_color_relock_after_miss_frames,
+            "disable_blob_fallback": disable_blob_fallback,
             "small_search_enter_frames": small_search_enter_frames,
             "small_search_yaw_amp_deg": small_search_yaw_amp_deg,
             "small_search_pitch_amp_deg": small_search_pitch_amp_deg,
@@ -206,15 +243,28 @@ def generate_launch_description():
             "startup_hold_frames": startup_hold_frames,
             "publish_tracking_debug": publish_tracking_debug,
             "show_vis_window": show_vis_window,
+            "runtime_tuning_enable": runtime_tuning_enable,
             "publish_trace_debug_image": publish_trace_debug_image,
             "trace_debug_image_topic": trace_debug_image_topic,
             "debug_overlay_hough_circles": debug_overlay_hough_circles,
             "debug_overlay_min_area_rect": debug_overlay_min_area_rect,
             "aim_workflow_enabled": aim_workflow_enabled,
+            "stable_online_mode": stable_online_mode,
+            "stable_target_hold_frames": stable_target_hold_frames,
+            "stable_transition_blend_frames": stable_transition_blend_frames,
+            "stable_disable_predict": stable_disable_predict,
+            "stable_disable_search": stable_disable_search,
+            "stable_fixed_dt_s": stable_fixed_dt_s,
             "large_purple_family_match": large_purple_family_match,
             "large_blob_hsv_relabel": large_blob_hsv_relabel,
             "large_blob_hsv_max_dist_sq": large_blob_hsv_max_dist_sq,
             "large_center_shape_first": large_center_shape_first,
+            "center_square_area_rel_tol": center_square_area_rel_tol,
+            "center_square_diam_side_rel_tol": center_square_diam_side_rel_tol,
+            "square_max_dist_center_radius": square_max_dist_center_radius,
+            "fallback_blob_max_area_ratio": fallback_blob_max_area_ratio,
+            "fallback_blob_min_dist_center_radius": fallback_blob_min_dist_center_radius,
+            "fallback_blob_max_dist_center_radius": fallback_blob_max_dist_center_radius,
             "center_circularity_min": center_circularity_min,
             "large_center_hsv_max_dist_sq": large_center_hsv_max_dist_sq,
             "large_square_min_contour_area": large_square_min_contour_area,
@@ -254,6 +304,10 @@ def generate_launch_description():
             "lab_canny_bridge_mask_dilate": lab_canny_bridge_mask_dilate,
             "servo_pitch_travel_half_span_deg": servo_pitch_travel_half_span_deg,
             "servo_yaw_travel_half_span_deg": servo_yaw_travel_half_span_deg,
+            "servo_pitch_travel_pos_deg": servo_pitch_travel_pos_deg,
+            "servo_pitch_travel_neg_deg": servo_pitch_travel_neg_deg,
+            "servo_yaw_travel_pos_deg": servo_yaw_travel_pos_deg,
+            "servo_yaw_travel_neg_deg": servo_yaw_travel_neg_deg,
             "servo_angle_smooth_beta": servo_angle_smooth_beta,
         }],
         output='both',  
@@ -393,6 +447,37 @@ def generate_launch_description():
             description="灰世界强度 0~1；0 等价于关，1 为完全按通道均值拉齐",
         ),
         DeclareLaunchArgument(
+            "camera_v4l_auto_exposure",
+            default_value="-1",
+            description="read_image V4L：-1 不改；1 常为手动曝光；3 常为自动（以驱动为准）。颜色乱跳可试手动+关 AWB",
+        ),
+        DeclareLaunchArgument(
+            "camera_v4l_set_exposure",
+            default_value="false",
+            choices=["true", "false"],
+            description="是否写入 camera_v4l_exposure（通常需 camera_v4l_auto_exposure:=1）",
+        ),
+        DeclareLaunchArgument(
+            "camera_v4l_exposure",
+            default_value="-6.0",
+            description="read_image CAP_PROP_EXPOSURE（UVC 常为负值档位，需实测）",
+        ),
+        DeclareLaunchArgument(
+            "camera_v4l_auto_wb",
+            default_value="-1",
+            description="read_image 自动白平衡：-1 不改；0 关；1 开",
+        ),
+        DeclareLaunchArgument(
+            "camera_v4l_wb_temperature",
+            default_value="-1",
+            description="read_image 色温 K，>=0 时尝试设置（相机不支持则无效）",
+        ),
+        DeclareLaunchArgument(
+            "camera_v4l_gain",
+            default_value="-1.0",
+            description="read_image 增益，>=0 设置；-1 不改",
+        ),
+        DeclareLaunchArgument(
             "servo_baudrate",
             default_value="9600",
             description="舵机串口波特率（与控制板保持一致）",
@@ -449,13 +534,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "track_same_color_square_only",
-            default_value="true",
+            default_value="false",
             choices=["true", "false"],
             description="small 模式是否优先同色方块作为目标（track_color_square_only=false 时生效）",
         ),
         DeclareLaunchArgument(
             "track_color_square_only",
-            default_value="true",
+            default_value="false",
             choices=["true", "false"],
             description="true：只追色块（大能量紫/小能量蓝），光学中心作转盘参考；false：原中心圆+扇区",
         ),
@@ -473,7 +558,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "large_square_roi_frac",
-            default_value="0.77",
+            default_value="0.70",
             description="大能量+纯色块：中心 ROI 边长占画面比例（与 offline_trace roi_frac 对齐）；过小易裁掉边缘扇区，过大易进杂景",
         ),
         DeclareLaunchArgument(
@@ -507,6 +592,28 @@ def generate_launch_description():
             description="small 模式：中心圆盘被标成 square 时，允许距画面中心的最大距离(×min边)",
         ),
         DeclareLaunchArgument(
+            "small_color_only_after_lock_enable",
+            default_value="false",
+            choices=["true", "false"],
+            description="small 模式：稳定锁定同色后进入仅追同色方块阶段（不再依赖中心圆识别）",
+        ),
+        DeclareLaunchArgument(
+            "small_color_only_arm_frames",
+            default_value="6",
+            description="small 模式：进入仅追同色方块阶段所需的中心色稳定帧数",
+        ),
+        DeclareLaunchArgument(
+            "center_color_relock_after_miss_frames",
+            default_value="10",
+            description="已锁中心色后，连续不一致达到该帧数才重锁颜色（避免每帧重判抖动）",
+        ),
+        DeclareLaunchArgument(
+            "disable_blob_fallback",
+            default_value="true",
+            choices=["true", "false"],
+            description="true：禁用同色blob回退，只保留同色四边形主路径",
+        ),
+        DeclareLaunchArgument(
             "small_search_enter_frames",
             default_value="3",
             description="连续未锁定(无中心或无扇区目标)达到该帧数后进入搜索模式",
@@ -533,12 +640,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "small_lab_thresh",
-            default_value="58.0",
+            default_value="74.2",
             description="small 模式(蓝色 id9) Lab 距离阈值，一般 54~62",
         ),
         DeclareLaunchArgument(
             "large_lab_thresh",
-            default_value="71.5",
+            default_value="74.2",
             description="large Lab 阈值（与 offline_trace lab_thresh 对齐）；略放宽利于召回，误检多再略降",
         ),
         DeclareLaunchArgument(
@@ -573,7 +680,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "trace_proc_width_cap_small",
-            default_value="880",
+            default_value="960",
             description="小能量：同上宽度上限",
         ),
         DeclareLaunchArgument(
@@ -633,12 +740,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "init_pitch_deg",
-            default_value="340.0",
-            description="上电俯仰初值(度，发到 servo_id_pitch 默认8号)；默认340°，按实机再调",
+            default_value="335.0",
+            description="上电俯仰初值(度，发到 servo_id_pitch 默认11号)",
         ),
         DeclareLaunchArgument(
             "init_yaw_deg",
-            default_value="170.0",
+            default_value="340.0",
             description="上电偏航初值(度)；360°舵机可用 0~360",
         ),
         DeclareLaunchArgument(
@@ -678,7 +785,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "vis_clahe_l_clip_limit",
-            default_value="0.0",
+            default_value="0.00",
             description="trace 内 Lab L 通道 CLAHE，0 关闭；光照变化大时可试 2.0~3.5",
         ),
         DeclareLaunchArgument(
@@ -709,13 +816,33 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "servo_pitch_travel_half_span_deg",
-            default_value="40.0",
-            description="俯仰相对 init_pitch 的±半宽(度)；0=仅用 servo_pitch_min/max",
+            default_value="0.0",
+            description="俯仰相对 init_pitch 的对称±半宽(度)。>0 时覆盖非对称配置",
         ),
         DeclareLaunchArgument(
             "servo_yaw_travel_half_span_deg",
-            default_value="40.0",
-            description="偏航相对 init_yaw 的±半宽(度)；0=不额外限制",
+            default_value="0.0",
+            description="偏航相对 init_yaw 的对称±半宽(度)。>0 时覆盖非对称配置",
+        ),
+        DeclareLaunchArgument(
+            "servo_pitch_travel_pos_deg",
+            default_value="10.0",
+            description="俯仰相对 init_pitch 的正向行程(度)",
+        ),
+        DeclareLaunchArgument(
+            "servo_pitch_travel_neg_deg",
+            default_value="10.0",
+            description="俯仰相对 init_pitch 的负向行程(度)",
+        ),
+        DeclareLaunchArgument(
+            "servo_yaw_travel_pos_deg",
+            default_value="20.0",
+            description="偏航相对 init_yaw 的正向行程(度)",
+        ),
+        DeclareLaunchArgument(
+            "servo_yaw_travel_neg_deg",
+            default_value="20.0",
+            description="偏航相对 init_yaw 的负向行程(度)",
         ),
         DeclareLaunchArgument(
             "servo_angle_smooth_beta",
@@ -740,6 +867,12 @@ def generate_launch_description():
             description="是否弹出 OpenCV 调试窗口；无桌面/SSH 请设为 false，否则可能因 GTK 崩溃",
         ),
         DeclareLaunchArgument(
+            "runtime_tuning_enable",
+            default_value="true",
+            choices=["true", "false"],
+            description="在 OpenCV 调试窗口启用实时控制参数滑条（Trackbar）",
+        ),
+        DeclareLaunchArgument(
             "servo_port",
             default_value="",
             description="可选：强制指定舵机串口（如 /dev/ttyACM1）",
@@ -749,6 +882,39 @@ def generate_launch_description():
             default_value="false",
             choices=["true", "false"],
             description="true：须先 aim_command=2 锁中心色再 1 开始瞄准，未开始时舵机冻结；false：沿用自动识别",
+        ),
+        DeclareLaunchArgument(
+            "stable_online_mode",
+            default_value="true",
+            choices=["true", "false"],
+            description="稳定在线闭环模式：保留ROS闭环，但减少预测/搜索带来的链路复杂度",
+        ),
+        DeclareLaunchArgument(
+            "stable_target_hold_frames",
+            default_value="3",
+            description="稳定模式：短时丢检时保持上一目标帧数",
+        ),
+        DeclareLaunchArgument(
+            "stable_transition_blend_frames",
+            default_value="5",
+            description="稳定模式：LOCK_CENTER<->TRACK_SQUARE切换后的缓启动帧数",
+        ),
+        DeclareLaunchArgument(
+            "stable_disable_predict",
+            default_value="true",
+            choices=["true", "false"],
+            description="稳定模式：是否禁用预测滑行（COAST）",
+        ),
+        DeclareLaunchArgument(
+            "stable_disable_search",
+            default_value="true",
+            choices=["true", "false"],
+            description="稳定模式：是否禁用SEARCH摇摆搜索",
+        ),
+        DeclareLaunchArgument(
+            "stable_fixed_dt_s",
+            default_value="0.04",
+            description="稳定模式：控制固定步长秒数（建议0.04对应25Hz）",
         ),
         DeclareLaunchArgument(
             "large_purple_family_match",
@@ -769,13 +935,43 @@ def generate_launch_description():
             description="大能量：先按形状找中心圆，再对中心轮廓均值 HSV 读色，再追同色扇区",
         ),
         DeclareLaunchArgument(
+            "center_square_area_rel_tol",
+            default_value="0.45",
+            description="中心圆与同色方块面积相对误差上限（|A_sq-A_c|/A_c）",
+        ),
+        DeclareLaunchArgument(
+            "center_square_diam_side_rel_tol",
+            default_value="0.35",
+            description="中心圆直径与同色方块边长相对误差上限（|D_c-side|/side）",
+        ),
+        DeclareLaunchArgument(
+            "square_max_dist_center_radius",
+            default_value="2.8",
+            description="同色方块距中心圆最大距离（按中心圆半径倍数）；过大易吃到背景板",
+        ),
+        DeclareLaunchArgument(
+            "fallback_blob_max_area_ratio",
+            default_value="0.10",
+            description="回退同色blob筛选最大面积占比（抑制大背景同色块）",
+        ),
+        DeclareLaunchArgument(
+            "fallback_blob_min_dist_center_radius",
+            default_value="0.35",
+            description="回退同色blob距中心圆的最小距离（按中心圆半径倍数）",
+        ),
+        DeclareLaunchArgument(
+            "fallback_blob_max_dist_center_radius",
+            default_value="3.0",
+            description="回退同色blob距中心圆的最大距离（按中心圆半径倍数）",
+        ),
+        DeclareLaunchArgument(
             "center_circularity_min",
-            default_value="0.74",
+            default_value="0.73",
             description="中心候选轮廓圆度下限（与 offline_trace center_circ_min 对齐）",
         ),
         DeclareLaunchArgument(
             "large_center_hsv_max_dist_sq",
-            default_value="6200.0",
+            default_value="5200.0",
             description="中心圆读色时 HSV 距离平方上限（与 color_table 比，过小会退回 Lab cid）",
         ),
         DeclareLaunchArgument(
@@ -801,12 +997,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "center_circle_area_ratio_min",
-            default_value="0.8",
+            default_value="0.80",
             description="中心候选：轮廓面积/最小外接圆面积下限（offline_trace circle_area_ratio_min）",
         ),
         DeclareLaunchArgument(
             "center_rect_area_ratio_max",
-            default_value="0.9",
+            default_value="0.90",
             description="中心候选：轮廓面积/最小外接矩形面积上限（offline_trace rect_area_ratio_max）",
         ),
         DeclareLaunchArgument(
@@ -885,7 +1081,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "center_roi_zoom",
-            default_value="1.0",
+            default_value="1.40",
             description="中心数字变焦：>1 先裁更小中心 ROI 再拉回原尺寸再跟踪（建议 1.0~1.35，与 large_square_roi_frac 叠加）",
         ),
         DeclareLaunchArgument(
@@ -896,12 +1092,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "servo_id_pitch",
-            default_value="8",
+            default_value="11",
             description="俯仰舵机 ID（须与串口节点协议一致；常见 8 或 1）",
         ),
         DeclareLaunchArgument(
             "servo_id_yaw",
-            default_value="11",
+            default_value="8",
             description="偏航舵机 ID（须与串口节点一致；常见 11 或 10）",
         ),
         DeclareLaunchArgument(

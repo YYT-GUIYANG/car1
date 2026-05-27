@@ -3,3 +3,10 @@ install/
 log/
 .vscode/
 .marscode
+
+# trace_energy_ws 运行日志（源码侧 clean.sh 也会删）
+trace_energy_ws/.ros_logs/
+trace_energy_ws/.ros_smoke_logs/
+trace_energy_ws/.roslog/
+trace_energy_ws/*.log
+trace_energy_ws/run_test_*.txt
