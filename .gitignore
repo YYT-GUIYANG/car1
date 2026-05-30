@@ -10,3 +10,7 @@ trace_energy_ws/.ros_smoke_logs/
 trace_energy_ws/.roslog/
 trace_energy_ws/*.log
 trace_energy_ws/run_test_*.txt
+
+# PPT 目录不上传视频
+PPT/*.mp4
+PPT/**/*.mp4
